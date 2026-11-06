@@ -56,6 +56,8 @@ class PlanTest(unittest.TestCase):
             {"sha": SHA, "kind": "recite-switch-emu", "runner_sha": RUNNER},     # لا يُنقل
             {"sha": SHA, "kind": "engine-models", "runner_sha": RUNNER},         # ليس من السبعة
             {"sha": SHA, "kind": "dry-run", "runner_sha": RUNNER},               # التجربةُ يدويّةٌ فقط
+            {"sha": SHA, "kind": "dry-run-emu", "runner_sha": RUNNER},           # وكذا كلُّ نوعٍ مصدرُه عامّ
+            {"sha": SHA, "kind": "dry-run-stress", "runner_sha": RUNNER},
             {"sha": SHA, "kind": "$(id)", "runner_sha": RUNNER},
             ["not", "a", "dict"],
         ]
@@ -84,6 +86,23 @@ class PlanTest(unittest.TestCase):
         out = self.ok(event="workflow_dispatch", dry_run="true", plant="true")
         self.assertEqual((out["kind"], out["source"], out["plant"], out["sha"]), ("dry-run", "public", "true", RUNNER))
 
+    def test_dispatch_probe_switches_pick_public_kinds_and_never_both(self):
+        """الإصلاحُ الخامس: emu_probe ⇒ dry-run-emu (شوطُه بمحاكٍ) · stress_tree ⇒ dry-run-stress · لا يجتمعان · ومصدرُهما عامّ."""
+        out = self.ok(event="workflow_dispatch", dry_run="true", emu_probe="true")
+        legs = json.loads(out["legs"])
+        self.assertEqual((out["kind"], out["source"], out["sha"]), ("dry-run-emu", "public", RUNNER))
+        self.assertEqual([(x["id"], x["has_emu"]) for x in legs], [("api30", True)])
+        out = self.ok(event="workflow_dispatch", dry_run="true", stress_tree="true")
+        self.assertEqual((out["kind"], out["source"]), ("dry-run-stress", "public"))
+        self.assertFalse(json.loads(out["legs"])[0]["has_emu"])
+        with self.assertRaises(plan.PlanError):
+            self.ok(event="workflow_dispatch", dry_run="true", emu_probe="true", stress_tree="true")
+        with self.assertRaises(plan.PlanError):
+            self.ok(event="workflow_dispatch", dry_run="false", emu_probe="true")
+        self.assertEqual(self.ok(event="workflow_dispatch", dry_run="true", emu_probe="false")["kind"], "dry-run")
+        # المفتاحان لا يغيّران repository_dispatch
+        self.assertEqual(self.ok(emu_probe="true")["kind"], "app-test")
+
     def test_plant_ignored_on_dispatch(self):
         self.assertEqual(self.ok(plant="true")["plant"], "false")
 
@@ -93,7 +112,8 @@ class PlanTest(unittest.TestCase):
                 self.ok(event=ev)
 
     def test_seven_kinds_and_timeouts(self):
-        self.assertEqual(set(KINDS), SEVEN | {"dry-run"})
+        self.assertEqual(set(KINDS), SEVEN | {"dry-run", "dry-run-emu", "dry-run-stress"})
+        self.assertEqual({k for k, v in KINDS.items() if v["source"] == "public"}, {"dry-run", "dry-run-emu", "dry-run-stress"})
         for k, spec in KINDS.items():
             ids = [leg["id"] for leg in spec["legs"]]
             self.assertEqual(len(ids), len(set(ids)), k)

@@ -33,12 +33,23 @@ on:
         type: boolean
         required: false
         default: false
+      # الإصلاحُ الخامس (مراجعة Codex 14): تجربتان عامّتان بلا سرٍّ ولا استنساخٍ للخاصّ — لا تجتمعان (plan.py يرفض)
+      emu_probe:
+        description: "مسبارُ المحاكي الحيّ (النوع dry-run-emu): المحاكي وADB بمستخدم البناء ثمّ إثباتُ العزل والعبورِ الفاشل"
+        type: boolean
+        required: false
+        default: false
+      stress_tree:
+        description: "شجرةٌ كبيرةٌ في طور البناء (النوع dry-run-stress) لقياس زمن التملّك في finalize وسلوكِ مهلته"
+        type: boolean
+        required: false
+        default: false
 
 # 🛡️ D9: لا صلاحيةَ على مستوى السير؛ كلُّ وظيفةٍ تأخذ ما يلزمها وحدها.
 permissions: {}
 
 concurrency:
-  group: private-ci-${{ github.event.client_payload.kind || 'dry-run' }}-${{ github.event.client_payload.sha || github.sha }}
+  group: private-ci-${{ github.event.client_payload.kind || (inputs.emu_probe && 'dry-run-emu') || (inputs.stress_tree && 'dry-run-stress') || 'dry-run' }}-${{ github.event.client_payload.sha || github.sha }}
   # ⛔ لا إلغاء: وظيفةُ publish تجري دائماً، فإلغاءُ تشغيلةٍ قديمة يكتب «تعذّر» قد يسبق حالةَ الجديدة على السياق نفسِه.
   cancel-in-progress: false
 
@@ -67,6 +78,8 @@ jobs:
           PCI_PAYLOAD: ${{ toJSON(github.event.client_payload) }}
           PCI_DRY_RUN: ${{ inputs.dry_run }}
           PCI_PLANT: ${{ inputs.plant_leak }}
+          PCI_EMU_PROBE: ${{ inputs.emu_probe }}
+          PCI_STRESS_TREE: ${{ inputs.stress_tree }}
           PCI_HEAD_SHA: ${{ github.sha }}
           PCI_REF: ${{ github.ref }}
         run: python3 jobs/private_ci/plan.py
@@ -127,6 +140,7 @@ jobs:
 
       # أ2: لا إجراءَ محاكٍ بحساب العدّاء — المحاكي وخادمُ ADB يُقلعهما المشرفُ **بمستخدم البناء** (طور emu_up) بمنفذٍ خاصّ،
       #     وصورةُ النظام ثبّتها أمرٌ ثابتٌ (sysimg) قبل أيّ سطرٍ غيرِ موثوق؛ ولا adb بحسابٍ آخر قبل الأطوار ولا بعدها (فحصٌ 18).
+      #     وفي التجربة emu_probe (النوع dry-run-emu · شوطُه has_emu) تجري هذه الخطوةُ نفسُها ثمّ طورُ المسبار الموثوق emu_probe.
       - name: المحاكي بمستخدم البناء (المخرجات إلى ملف)
         if: steps.clone.outcome == 'success' && matrix.leg.has_emu
         run: bash "$RUNNER_TEMP/pci/ctl/supervise.sh" emu

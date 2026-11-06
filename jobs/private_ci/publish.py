@@ -238,7 +238,8 @@ def run(env, kinds=None, fetch_logs=fetch_build_logs, uploader=upload_r2.upload_
     sha_ok = bool(SHA_RE.fullmatch(sha or ""))
     if not (kind_ok and sha_ok):
         plan_ok = False
-    dry = kind == "dry-run"
+    # التجاربُ: كلُّ نوعٍ مصدرُه هذا المستودعُ العامّ (dry-run · dry-run-emu · dry-run-stress) — لا حالةَ تُرسل ولا سرَّ يلزم
+    dry = kind_ok and kinds[kind].get("source") == "public"
     legs = read_legs(env.get("PCI_IN", ""), kind, sha, kinds) if plan_ok else []
 
     # الحارس على سجلّات build العلنيّة
@@ -301,7 +302,7 @@ def run(env, kinds=None, fetch_logs=fetch_build_logs, uploader=upload_r2.upload_
             status_code = 0
         print(f"الحالة: {'✅' if status_code == 201 else '⛔'} public-ci/{kind} = {state} · HTTP {status_code}")
     elif dry:
-        print(f"الحالة (تجربة — لم تُرسل): public-ci/dry-run = {state}")
+        print(f"الحالة (تجربة — لم تُرسل): public-ci/{kind} = {state}")
     return {"state": state, "reason": reason, "guard": guard_state, "upload": upload_state, "summary": md,
             "status_code": status_code, "suspicious": guard_state == "suspicious"}
 

@@ -8,6 +8,8 @@
    دُفع إلى main بعد الفحص. ويُخرج sha وkind وsource (إن صحّ الأوّلان شكلاً) كي تكتب وظيفةُ publish حالةَ «تعذّر» بدل انتظارٍ معلَّق.
 ⛔ ولا تُطبع قيمةٌ واردةٌ عند الرفض — رسالةٌ ثابتةٌ فقط.
 ✅ workflow_dispatch لا يجري إلا تجربةً (dry_run=true) على هذا المستودع العامّ نفسِه؛ ولا طريقَ منه إلى الخاص.
+   ومفتاحاه (الإصلاح الخامس): emu_probe=true ⇒ النوعُ dry-run-emu (مسبارُ المحاكي الحيّ) · stress_tree=true ⇒ dry-run-stress
+   (شجرةٌ كبيرةٌ لقياس مهلة التملّك) — كلاهما مصدرُه عامّ، ولا يجتمعان. وrepository_dispatch لا يقبل نوعاً مصدرُه عامّ أصلاً.
 ✅ والحدثان كلاهما من main وحده (‏وبيئتا build/publish مقيَّدتان به أيضاً من الإعدادات).
 """
 import json
@@ -48,7 +50,11 @@ def legs_for(spec):
     return legs
 
 
-def decide(event, payload_json, dry_run, plant, head_sha, ref, kinds):
+def _true(v):
+    return str(v).lower() == "true"
+
+
+def decide(event, payload_json, dry_run, plant, head_sha, ref, kinds, emu_probe="false", stress_tree="false"):
     """تُعيد قاموسَ المخرجات أو ترفع PlanError."""
     if not SHA_RE.fullmatch(head_sha or ""):
         raise PlanError("⛔ رأسُ المستودع العام غيرُ صالح")
@@ -57,8 +63,13 @@ def decide(event, payload_json, dry_run, plant, head_sha, ref, kinds):
             raise PlanError("⛔ التجربةُ من main وحده")
         if str(dry_run).lower() != "true":
             raise PlanError("⛔ التشغيلُ اليدويّ تجربةٌ فقط (dry_run=true) — ولا يُستنسخ منه المستودعُ الخاص")
-        kind, sha, runner_sha = "dry-run", head_sha, head_sha
-        plant = "true" if str(plant).lower() == "true" else "false"
+        if _true(emu_probe) and _true(stress_tree):
+            raise PlanError("⛔ تجربةٌ واحدةٌ في كلّ تشغيلة: emu_probe أو stress_tree لا كلاهما")
+        kind = "dry-run-emu" if _true(emu_probe) else "dry-run-stress" if _true(stress_tree) else "dry-run"
+        if kind not in kinds or kinds[kind].get("source") != "public":
+            raise PlanError("⛔ نوعُ التجربة غيرُ معرَّف")
+        sha, runner_sha = head_sha, head_sha
+        plant = "true" if _true(plant) else "false"
     elif event == "repository_dispatch":
         try:
             payload = json.loads(payload_json or "null")
@@ -69,7 +80,8 @@ def decide(event, payload_json, dry_run, plant, head_sha, ref, kinds):
         sha, kind, runner_sha = payload["sha"], payload["kind"], payload["runner_sha"]
         if not isinstance(sha, str) or not SHA_RE.fullmatch(sha):
             raise PlanError("⛔ sha غيرُ صالح")
-        if not isinstance(kind, str) or kind not in kinds or kind == "dry-run":
+        # التجاربُ (كلُّ نوعٍ مصدرُه عامّ) يدويّةٌ وحدها — لا يطلبها المرسِلُ الخاصّ
+        if not isinstance(kind, str) or kind not in kinds or kinds[kind].get("source") != "private":
             raise PlanError("⛔ نوعُ مهمّةٍ غيرُ مسموح")
         # D15: ما صحّ شكلُه يُخرج مع المصدر كي تكتب publish حالةَ «تعذّر» (error · plan) بدل أن يبقى «قيد الانتظار»
         partial = {"sha": sha, "kind": kind, "source": kinds[kind]["source"]}
@@ -105,7 +117,8 @@ def main():
     e = os.environ
     try:
         out = decide(e.get("PCI_EVENT", ""), e.get("PCI_PAYLOAD", ""), e.get("PCI_DRY_RUN", ""),
-                     e.get("PCI_PLANT", "false"), e.get("PCI_HEAD_SHA", ""), e.get("PCI_REF", ""), load_kinds())
+                     e.get("PCI_PLANT", "false"), e.get("PCI_HEAD_SHA", ""), e.get("PCI_REF", ""), load_kinds(),
+                     e.get("PCI_EMU_PROBE", "false"), e.get("PCI_STRESS_TREE", "false"))
     except PlanError as err:
         # ما صحّ شكلُه وحده يُخرج — لتكتب publish حالةَ «تعذّر» على الإيداع الخاصّ بدل أن يبقى «قيد الانتظار».
         write_outputs(e["GITHUB_OUTPUT"], dict(err.partial, ok="false"))

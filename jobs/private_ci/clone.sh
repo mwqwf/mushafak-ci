@@ -36,7 +36,7 @@ BUILD_SET=(/gradlew /gradle/ /settings.gradle.kts /build.gradle.kts /gradle.prop
            /app/ /core/ /engine/ /feature/ /baselineprofile/ /tools/size/)
 sparse_for_kind(){
   case "$PCI_KIND" in
-    dry-run)                     printf '%s\n' /jobs/private_ci/ ;;
+    dry-run|dry-run-emu|dry-run-stress) printf '%s\n' /jobs/private_ci/ ;;
     app-test)                    printf '%s\n' "${BUILD_SET[@]}" /tools/ai/ /tools/ux/ /tools/i18n/ /docs/ai/app_guide/ ;;
     engine-test)                 printf '%s\n' "${BUILD_SET[@]}" /tools/tasmi_bench/ /tools/tasmi_phoneme/ /tools/ci/ ;;
     tasmi-model-emulator-smoke)  printf '%s\n' "${BUILD_SET[@]}" /tools/ci/ ;;

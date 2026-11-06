@@ -169,8 +169,17 @@ class KindsTest(unittest.TestCase):
                     self.assertFalse(p["id"].startswith("selftest_"), "طورٌ تجريبيٌّ في الإنتاج")
                     self.assertIs(type(p["emu"]), bool)
                     self.assertIs(type(p["optional"]), bool)
-                # أطوارُ المشرف الثابتةُ ثلاثةٌ فقط (sysimg · disk · kvm) وتسبق طورَ المحاكي
-                self.assertTrue({p["id"] for p in phases if p["who"] == "runner"} <= {"sysimg", "disk", "kvm"})
+                # أطوارُ المشرف الثابتةُ ثلاثةٌ فقط (sysimg · disk · kvm) وتسبق طورَ المحاكي؛ والإصلاحُ الخامس: مسبارُ المحاكي emu_probe
+                # (موثوقٌ بحساب العدّاء) والشجرةُ الكبيرة stress_tree لا يكونان إلا في نوعٍ مصدرُه عامّ (تجربةٌ يدويّة)
+                runner = {p["id"] for p in phases if p["who"] == "runner"}
+                if spec["source"] == "public":
+                    self.assertTrue(runner <= {"sysimg", "disk", "kvm", "emu_probe"})
+                else:
+                    self.assertTrue(runner <= {"sysimg", "disk", "kvm"})
+                    self.assertNotIn("emu_probe", ids)
+                    self.assertNotIn("stress_tree", ids)
+                if "emu_probe" in ids:
+                    self.assertEqual(phases[-1], {"id": "emu_probe", "who": "runner", "emu": True, "optional": False})
                 # أ2: نوعٌ بمحاكٍ يبدأ بـsysimg (قبل أيّ طورٍ غيرِ موثوق) وأوّلُ أطوار المحاكي emu_up بمستخدم البناء
                 if any(p["emu"] for p in phases):
                     self.assertEqual(phases[0], {"id": "sysimg", "who": "runner", "emu": False, "optional": False})
@@ -193,6 +202,8 @@ class KindsTest(unittest.TestCase):
         self.assertEqual(order["device-matrix"], ["sysimg", "whisper", "fatiha", "gradle", "lint", "disk", "kvm", "emu_up",
                                                   "emu_smoke", "emu_tasmi"])
         self.assertEqual(order["dry-run"], ["unit"])
+        self.assertEqual(order["dry-run-emu"], ["sysimg", "kvm", "emu_up", "emu_probe"])
+        self.assertEqual(order["dry-run-stress"], ["stress_tree"])
         self.assertEqual(order["engine-test"], ["pip", "fixture_selftest", "fixture_audit", "ffmpeg", "phoneme_gold", "jni", "gradle"])
 
     def test_phases_for_modes_and_lint(self):
