@@ -49,6 +49,31 @@ fatiha_wav(){ # تلاوةٌ بشريّةٌ منشورة (الحصري · الف
   [ "$(stat -c %s app/src/androidTest/assets/tasmi_fatiha_husary.wav)" -gt 640044 ]
 }
 
+stress_tree(){ # أ4 (الإصلاح الخامس · التجربة dry-run-stress وحدها): شجرةٌ كبيرةٌ في مجلّد المصدر ليقيس المشرفُ زمنَ التملّك وسلوكَ مهلته
+  #   240 ألفَ ملفٍّ صغير في 2400 مجلّدٍ بعمق 4 + سلسلةٌ بعمق 64 — بالمكتبة القياسيّة وحدها، ويطبع العددَ في السجلّ الخاصّ
+  python3 -I -S - "$PCI_SRC/stress" <<'PY'
+import os, sys
+root, n = sys.argv[1], 0
+for a in range(24):
+    for b in range(20):
+        for c in range(5):
+            d = os.path.join(root, f"a{a:02d}", f"b{b:02d}", f"c{c}")
+            os.makedirs(d, exist_ok=True)
+            for i in range(100):
+                with open(os.path.join(d, f"f{i:03d}.txt"), "w") as f:
+                    f.write("x\n")
+                n += 1
+deep = root
+for i in range(64):
+    deep = os.path.join(deep, f"d{i:02d}")
+os.makedirs(deep, exist_ok=True)
+with open(os.path.join(deep, "leaf.txt"), "w") as f:
+    f.write("x\n")
+print(f"stress_tree: {n + 1} ملفّاً")
+sys.exit(0 if n == 240000 else 1)
+PY
+}
+
 gradle(){ chmod +x ./gradlew && ./gradlew --no-daemon --console=plain "$@"; }
 
 jni_check(){ # فحصٌ نحويٌّ لجسر jni.c على ترويسات الالتزام المثبَّت (‏مطابقٌ لوظيفة jni في engine-test.yml)
@@ -161,6 +186,7 @@ run_phase(){
     emu_up)           emu_up ;;
     emu)              emu_phase ;;
     emu_smoke)        bash tools/qa/device_smoke.sh "$(ls app/build/outputs/apk/debug/*.apk | head -1)" "$PCI_BDEVICE" "$PCI_LEG" ;;
+    stress_tree)      stress_tree ;;
     emu_tasmi)        bash tools/qa/tasmi_device.sh "$(ls app/build/outputs/apk/androidTest/debug/*.apk | head -1)" "$PCI_BDEVICE" ;;
     # أطوارٌ تجريبيّةٌ للاختبار المحلّيّ (تُذكر في kinds تجريبيٍّ وحده)
     selftest_ok)      true ;;

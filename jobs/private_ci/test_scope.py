@@ -141,8 +141,8 @@ def main_violations(text):
     if (rd.get("types") if isinstance(rd, dict) else None) != ["private-ci"]:
         v.append(f"{MAIN}: repository_dispatch بنوعٍ غير private-ci")
     wd = on.get("workflow_dispatch") or {}
-    if set(((wd.get("inputs") or {}) if isinstance(wd, dict) else {})) != {"dry_run", "plant_leak"}:
-        v.append(f"{MAIN}: مدخلاتُ workflow_dispatch غيرُ dry_run وplant_leak")
+    if set(((wd.get("inputs") or {}) if isinstance(wd, dict) else {})) != {"dry_run", "plant_leak", "emu_probe", "stress_tree"}:
+        v.append(f"{MAIN}: مدخلاتُ workflow_dispatch غيرُ dry_run وplant_leak وemu_probe وstress_tree")
     if d.get("permissions") != {}:
         v.append(f"{MAIN}: permissions أعلى السير ليست {{}}")
     conc = d.get("concurrency") or {}
@@ -329,10 +329,19 @@ def sh_violations(jobs_dir):
         if name != SUPERVISOR and re.search(r"(?m)^[^#\n]*\bsudo\b", body):
             v.append(f"jobs/private_ci/{name}: sudo خارج supervise.sh")
         if name == SUPERVISOR:
-            # أ2: المشرفُ (حسابُ العدّاء) لا يشغّل adb ولا المحاكي ولا avdmanager — تلك بمستخدم البناء وحده
-            if re.search(r"(?m)^[^#\n]*(?:platform-tools/adb|emulator/emulator|\bavdmanager\b|\badb\s+(?:start-server|-s|shell|kill))",
-                         body):
-                v.append(f"jobs/private_ci/{name}: المشرفُ يشغّل adb أو المحاكي")
+            # أ2: المشرفُ (حسابُ العدّاء) لا يشغّل adb ولا المحاكي ولا avdmanager — تلك بمستخدم البناء وحده.
+            #     الإصلاحُ الخامس: مسبارُ المحاكي يستدعي adb **بمستخدم البناء** فقط، بالصيغة الواحدة `as_builder [timeout N] adb`؛
+            #     وكلُّ سطرٍ غيرِ تعليقٍ فيه استدعاءُ adb يجب أن يكون استدعاءً واحداً بهذه الصيغة بعينها (لا adb ثانٍ ولا مسارٌ إليه).
+            for ln in body.splitlines():
+                if ln.lstrip().startswith("#"):
+                    continue
+                if re.search(r"platform-tools/adb|emulator/emulator|\bavdmanager\b", ln):
+                    v.append(f"jobs/private_ci/{name}: المشرفُ يشغّل adb أو المحاكي")
+                    continue
+                hits = re.findall(r"\badb\s+(?:start-server|-s|shell|kill|reverse|forward|devices)", ln)
+                if hits and (len(hits) != 1 or len(re.findall(r"\badb\b", ln)) != 1
+                             or not re.search(r"\bas_builder\s+(?:timeout\s+\S+\s+)?adb\s", ln)):
+                    v.append(f"jobs/private_ci/{name}: المشرفُ يشغّل adb أو المحاكي")
             # أ1: مدخلُ التحكّم في شجرةٍ يملكها root لا في بيت مستخدم البناء
             if 'CTL_DIR="/var/lib/pci-ctl"' not in body or "/home/pcibuild/ctl" in body:
                 v.append(f"jobs/private_ci/{name}: مدخلُ التحكّم ليس في /var/lib/pci-ctl")

@@ -272,7 +272,8 @@ class PubkeyFileTest(unittest.TestCase):
 
 PUBLIC_LINE = re.compile(
     r"^(العزل: .*|الاستنساخ: [✅⛔].*|الأطوار \((build|emu)\): \d+ · فاشلة \d+|الأطوار: ⛔ .*|التنظيف: ⛔ .*|الناتج: .*"
-    r"|المشرف: ⛔ .*)$")
+    r"|الإنهاء: (التملّك \d+ ث من -?\d+ متاحة|⛔ انقضت مهلةُ التملّك — لا تُقرأ الشجرة \(\d+ ث من -?\d+ متاحة\)|⛔ تعذّر التملّك — لا تُقرأ الشجرة|\d+ ث من ميزانيةٍ أقصاها \d+)"
+    r"|المحاكي: .*|مسبارُ المحاكي: .*|المشرف: ⛔ .*)$")
 ALLOWED_BUILDER_ENV = {
     "HOME", "PATH", "JAVA_HOME", "ANDROID_HOME", "ANDROID_SDK_ROOT", "ANDROID_USER_HOME", "GRADLE_USER_HOME", "GRADLE_OPTS",
     "CI", "TERM", "LANG", "PYTHONIOENCODING", "GITHUB_WORKFLOW_REF", "PCI_KIND", "PCI_LEG", "PCI_LINT", "PCI_SRC",
@@ -902,7 +903,11 @@ class SupervisorTest(unittest.TestCase):
         self.assertIn('run: bash "$RUNNER_TEMP/pci/ctl/supervise.sh" emu', wf)
         body = readf(os.path.join(HERE, "supervise.sh"))
         code = "\n".join(ln for ln in body.splitlines() if not ln.lstrip().startswith("#"))
-        self.assertNotRegex(code, r"platform-tools/adb|emulator/emulator|\bavdmanager\b|\badb\s+(start-server|-s|shell|kill)")
+        self.assertNotRegex(code, r"platform-tools/adb|emulator/emulator|\bavdmanager\b")
+        # الإصلاحُ الخامس: كلُّ استدعاء adb في المشرف بمستخدم البناء (as_builder) — والمسبارُ يستدعيه عبر badb وحدها
+        for ln in code.splitlines():
+            if re.search(r"\badb\s+(start-server|-s|shell|kill|reverse)", ln):
+                self.assertRegex(ln, r"\bas_builder\s+(timeout\s+\S+\s+)?adb\s", ln)
         self.assertIn('"ANDROID_ADB_SERVER_PORT=$ADB_PORT"', code)
         self.assertNotIn("ADB_PORT=5037", code)
         iso = code[code.index("isolation_tests(){"):code.index("foreign_emu_procs(){")]
@@ -917,6 +922,109 @@ class SupervisorTest(unittest.TestCase):
         self.assertEqual(self.sup("prepare").returncode, 0)
         self.assertEqual(readf(os.path.join(self.pci, "state", "run_tag")).strip().__len__(), 32)
 
+    # ───── الإصلاحُ الخامس (مراجعة Codex 14) ─────
+    def test_fix5_ownership_timeout_is_not_ready_and_tree_is_not_read(self):
+        """أ4: التملّكُ بمهلةٍ من ميزانية finalize الكلّيّة؛ انقضاؤها ⇒ --no-tree وready=false وسطرٌ علنيٌّ ثابت — ولا يتجاوز finalize ميزانيتَه."""
+        self.write_kinds(tiny_kinds(["selftest_ok"], kind="app-test"))
+        self.run_all(("prepare", "clone", "build"), PCI_KIND="app-test")
+        base = os.path.join(self.rt, "builder", "src", "app", "build", "test-results", "t")
+        os.makedirs(base)
+        with open(os.path.join(base, "a.xml"), "w") as f:
+            f.write('<testsuite tests="4" failures="0" errors="0" skipped="0"/>')
+        t0 = time.time()
+        r = self.sup("finalize", PCI_KIND="app-test", PCI_TEST_FIN_RESERVE="242", PCI_TEST_OWN_SLEEP="120")
+        self.assertLess(time.time() - t0, 60, "لم تُحترم مهلةُ التملّك")
+        self.assertRegex(r.stdout, r"(?m)^الإنهاء: ⛔ انقضت مهلةُ التملّك — لا تُقرأ الشجرة \(\d+ ث من -?\d+ متاحة\)$")
+        self.assertIn("الناتج: ⛔ غيرُ جاهزٍ — لا رفع", r.stdout)
+        self.assertEqual(self.ready(), "ready=false")
+        with open(os.path.join(self.pci, "art", "counts.json"), "rb") as f:
+            c = json.loads(f.read())
+        self.assertEqual((c["tests"], c["reports"], c["ok"]), (0, 0, False))   # الشجرةُ لم تُقرأ
+        m = re.search(r"(?m)^الإنهاء: (\d+) ث من ميزانيةٍ أقصاها (\d+)$", r.stdout)
+        self.assertTrue(m, r.stdout)
+        self.assertLessEqual(int(m.group(1)), int(m.group(2)))
+
+    def test_fix5_ownership_time_is_reported_when_it_succeeds(self):
+        self.run_all()
+        out = self.outputs[-1][1].stdout
+        self.assertRegex(out, r"(?m)^الإنهاء: التملّك \d+ ث من \d+ متاحة$")
+        self.assertRegex(out, r"(?m)^الإنهاء: \d+ ث من ميزانيةٍ أقصاها 300$")
+        self.assertEqual(self.ready(), "ready=true")
+
+    def test_fix5_finalize_budget_is_bounded_by_fin_reserve_in_the_source(self):
+        """الإثباتُ بالقراءة: سقوفُ ما بعد التملّك + هامشُ القتل + انتظارُ التنظيف (3 × 25 × 0.2 ث) < FIN_RESERVE؛ ولا مهلةَ ثابتةً
+        خارج الميزانية في finalize؛ والتملّكُ chown تحت `sudo -n timeout` (يُقتل chown نفسُه)."""
+        body = readf(os.path.join(HERE, "supervise.sh"))
+        val = lambda name: int(re.search(rf"\b{name}=(\d+)", body).group(1))   # noqa: E731
+        after = val("FIN_CAP_COUNTS") + val("FIN_CAP_GUARD") + val("FIN_CAP_ENC") + val("FIN_CAP_CHECK") + 4 * val("FIN_KILL")
+        self.assertIn("FIN_AFTER_OWN=$((FIN_CAP_COUNTS + FIN_CAP_GUARD + FIN_CAP_ENC + FIN_CAP_CHECK + 4 * FIN_KILL))", body)
+        self.assertLess(after + 3 * 25 * 0.2 + val("FIN_KILL"), val("FIN_RESERVE"))
+        code = "\n".join(ln for ln in body.splitlines() if not ln.lstrip().startswith("#"))
+        fin = code[code.index("do_finalize(){"):code.index('if [ "$MODE" != "prepare" ]')]
+        self.assertNotRegex(fin, r"\btimeout\s+\d+\s")                 # كلُّ مهلةٍ محسوبةٌ من الميزانية
+        self.assertEqual(fin.count('timeout -k "$FIN_KILL" "${t}s"'), 4)
+        self.assertIn("FIN_END=$(( be < t0 + FIN_RESERVE ? be : t0 + FIN_RESERVE ))", fin)
+        own = code[code.index("take_ownership(){"):code.index("do_finalize(){")]
+        self.assertIn('sudo -n timeout -k "$FIN_KILL" "${left}s" chown -R -P', own)
+        self.assertNotRegex(own, r"sudo -n chown")
+
+    def run_sock_probe(self, scan_rc, out, connect_rc=0):
+        """يشغّل sock_probe معزولةً عن سائر المشرف (run_root وas_builder بدائلُ تعيد ما يُعطى)."""
+        body = readf(os.path.join(HERE, "supervise.sh"))
+        rx = re.search(r"(?m)^SOCK_RX=.*$", body).group(0)
+        fn = body[body.index("sock_probe(){"):body.index("\n}\n", body.index("sock_probe(){")) + 3]
+        script = (f"{rx}\nrun_root(){{ return {scan_rc}; }}\nas_builder(){{ cat >/dev/null; printf '%s\\n' \"$FAKE\"; return {connect_rc}; }}\n"
+                  f"{fn}\nPCI_STATE=$1; BUSER=$(id -un); CTL_DIR=/nonexistent\n"
+                  "if sock_probe; then echo \"OK|$SOCK_PUB\"; else echo \"BAD|$SOCK_PUB\"; fi\n")
+        with tempfile.TemporaryDirectory() as d:
+            r = subprocess.run(["bash", "-c", script, "_", d], env=dict(os.environ, FAKE=out), capture_output=True, text=True)
+        return r.stdout.strip()
+
+    def test_fix5_sock_probe_reads_the_classified_line_and_fails_closed(self):
+        good = "n=15 accepted=0 denied=14 refused=0 vanished=1 other=0 inventory=complete"
+        self.assertEqual(self.run_sock_probe(0, good),
+                         "OK|مقابسُ حساب العدّاء: 15 فُحصت · مرفوضةٌ بالصلاحية 14 · بلا مُنصِت 0 · زالت 1 · أخرى 0 · قَبِلت 0 · الجردُ تامّ")
+        self.assertTrue(self.run_sock_probe(3, good).startswith("BAD|"))          # المصدرُ قال «ناقص»
+        self.assertIn("⛔ الجردُ ناقص", self.run_sock_probe(3, good))
+        for bad in (good.replace("refused=0", "refused=1"), good.replace("other=0", "other=1"),
+                    good.replace("accepted=0", "accepted=1"), good.replace("complete", "incomplete")):
+            with self.subTest(bad=bad):
+                self.assertTrue(self.run_sock_probe(0, bad).startswith("BAD|"))
+        self.assertTrue(self.run_sock_probe(0, good, connect_rc=1).startswith("BAD|"))
+        self.assertEqual(self.run_sock_probe(0, "15 0"), "BAD|مقابسُ حساب العدّاء: ⛔ نتيجةٌ غيرُ مقروءة")   # الصيغةُ القديمة
+        self.assertEqual(self.run_sock_probe(1, good), "BAD|مقابسُ حساب العدّاء: ⛔ تعذّر الجرد")
+
+    def test_fix5_emu_procs_counts_builder_and_foreign_and_fails_closed(self):
+        body = readf(os.path.join(HERE, "supervise.sh"))
+        fn = body[body.index("emu_procs(){"):body.index("\n}\n", body.index("emu_procs(){")) + 3]
+        me = os.getuid()
+        lines = f"{me} adb\\n{me} qemu-system-x86\\n{me} emulator\\n{me + 1} adb\\n{me} bash"
+        r = subprocess.run(["bash", "-c", f"ISO=0\nps(){{ printf '{lines}\\n'; }}\n{fn}\nemu_procs"], capture_output=True, text=True)
+        self.assertEqual(r.stdout.strip(), "1 2 1")
+        r = subprocess.run(["bash", "-c", f"ISO=0\nps(){{ return 1; }}\n{fn}\nemu_procs"], capture_output=True, text=True)
+        self.assertEqual(r.stdout.strip(), "? ? 1")                                # تعذّرُ ps لا يُقرأ صفراً
+
+    def test_fix5_emu_probe_is_trusted_and_uses_adb_only_as_the_builder(self):
+        """مسبارُ المحاكي طورٌ ثابتٌ في المشرف (لا من مصدرٍ خاصّ) · يُثبت الإيجابَ (≥1 بمستخدم البناء) والصفرَ الأجنبيّ · وdeny --exists ·
+        وضابطٌ موجبٌ عبر ADB قبل الحكم على الوسيط · وإعادةُ الجرد أثناء التشغيل وبعده · ويفشل بأيّ فحص."""
+        body = readf(os.path.join(HERE, "supervise.sh"))
+        code = "\n".join(ln for ln in body.splitlines() if not ln.lstrip().startswith("#"))
+        ep = code[code.index("emu_probe(){"):code.index("run_runner_phase(){")]
+        self.assertIn("emu_probe) ( emu_probe \"$2\" ) ;;", code)
+        for needle in ('ep ge1 "$a"; ep ge1 "$e"; ep [ "$f" = 0 ]', 'deny "$broker" --exists', 'deny "$sens" --exists',
+                       "deny /var/run/docker.sock", "reverse tcp:9998", "reverse tcp:9999", '"$CONTROL_MARK"',
+                       'ep [ "$thru" = 0 ]', "emu kill", "kill-server"):
+            self.assertIn(needle, ep)
+        self.assertEqual(ep.count("sock_probe"), 2)
+        self.assertIn('if [ "$ok" = "$n" ]; then pub "مسبارُ المحاكي: ✅ $ok/$n"; return 0; fi', ep)
+        self.assertNotIn("PCI_SRC", ep)
+        self.assertNotIn("$BSRC", ep)
+        kinds = json.loads(readf(os.path.join(HERE, "kinds.json")))
+        self.assertEqual([k for k, v in kinds.items() if not k.startswith("_") and any(p["id"] == "emu_probe" for p in v["phases"])],
+                         ["dry-run-emu"])
+        self.assertEqual(kinds["dry-run-emu"]["legs"][0]["emu"]["target"], "default")
+        build = readf(os.path.join(HERE, "build.sh"))
+        self.assertIn("stress_tree)      stress_tree ;;", build)
 
 class IsoProbeTest(unittest.TestCase):
     """أ2: مسبارُ المقابس — الجردُ يلتقط مقابسَ الحساب ومجموعاته (لا مجموعات البناء)، والاتّصالُ يُعدّ ولا يطبع اسماً."""
@@ -947,14 +1055,17 @@ class IsoProbeTest(unittest.TestCase):
             dead = os.path.join(d, "dead.sock")
             s2 = socket.socket(socket.AF_UNIX); s2.bind(dead); s2.close()      # ملفُّ مقبسٍ بلا مُنصِت
             data = b"".join(x.encode() + b"\0" for x in (live, dead, os.path.join(d, "none")))
-            r = subprocess.run([sys.executable, "-I", "-S", os.path.join(HERE, "iso_probe.py"), "connect"], input=data,
-                               capture_output=True)
+            complete = b"!inventory=complete truncated=0 walk_errors=0 unix_error=0 fd_errors=0 fd_vanished=0\0"
+            r = subprocess.run([sys.executable, "-I", "-S", os.path.join(HERE, "iso_probe.py"), "connect"],
+                               input=data + complete, capture_output=True)
             self.assertEqual(r.returncode, 1)
-            self.assertEqual(r.stdout.decode().strip(), "3 1")
+            self.assertEqual(r.stdout.decode().strip(),
+                             "n=3 accepted=1 denied=0 refused=1 vanished=1 other=0 inventory=complete")
             self.assertNotIn(d.encode(), r.stdout + r.stderr)
             r0 = subprocess.run([sys.executable, "-I", "-S", os.path.join(HERE, "iso_probe.py"), "connect"],
-                                input=os.path.join(d, "none").encode() + b"\0", capture_output=True)
-            self.assertEqual((r0.returncode, r0.stdout.decode().strip()), (0, "1 0"))
+                                input=os.path.join(d, "none").encode() + b"\0" + complete, capture_output=True)
+            self.assertEqual((r0.returncode, r0.stdout.decode().strip()),
+                             (0, "n=1 accepted=0 denied=0 refused=0 vanished=1 other=0 inventory=complete"))
             self.assertEqual(iso_probe.cmd_deny(os.path.join(d, "none")), 0)   # لا مقبس
             self.assertEqual(iso_probe.cmd_deny(live), 1)                       # قَبِل ⇒ فشل
             self.assertEqual(iso_probe.cmd_deny(dead), 2)                       # ECONNREFUSED: الصلاحيةُ متاحة ⇒ ليس نجاحاً

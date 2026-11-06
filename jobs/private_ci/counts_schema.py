@@ -42,6 +42,8 @@ PHASES = frozenset({
     "isolation", "cleanup",
     # أ2: صورةُ النظام (أمرٌ ثابتٌ بحساب العدّاء قبل أيّ طورٍ غيرِ موثوق) وإقلاعُ المحاكي وخادم ADB بمستخدم البناء
     "sysimg", "emu_up",
+    # الإصلاحُ الخامس: مسبارُ المحاكي الحيّ (طورٌ موثوقٌ بحساب العدّاء) والشجرةُ الكبيرة — في التجربتين العامّتين وحدهما
+    "emu_probe", "stress_tree",
     # أطوارٌ تجريبيّةٌ للاختبار المحلّيّ وحده (kinds.json الإنتاجيّ لا يذكرها — يفرض ذلك test_counts_schema)
     "selftest_ok", "selftest_fail", "selftest_noisy", "selftest_forge", "selftest_env",
     "selftest_tamper", "selftest_linger", "selftest_hold", "selftest_sleep", "selftest_limits",
@@ -59,7 +61,7 @@ XML_DIRS = {
     "ads-emulator-smoke": ["app/build/outputs/androidTest-results/connected"],
 }
 # أنواعٌ بلا JUnit (أو بعضُها): كلُّ طورٍ مسمّى غيرِ تجهيزيّ يُعدّ اختباراً واحداً.
-PHASE_COUNTED = frozenset({"dry-run", "engine-test", "hudhud-feature-test", "device-matrix"})
+PHASE_COUNTED = frozenset({"dry-run", "dry-run-emu", "dry-run-stress", "engine-test", "hudhud-feature-test", "device-matrix"})
 
 
 # أ2: معاملاتُ المحاكي تصل إلى بيئة البناء — فبأنماطٍ مغلقةٍ وحدها
