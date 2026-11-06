@@ -389,9 +389,11 @@ emu_sysimg(){ # أ2: أمرٌ ثابتٌ بحساب العدّاء — أوّل�
   sdk="$(readlink -f "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}")"; sdkm="$sdk/cmdline-tools/latest/bin/sdkmanager"
   [ -x "$sdkm" ] || return 1
   mkdir -p "$PCI_ROOT/tmp" || return 1
-  SDKMANAGER_OPTS="-Djava.io.tmpdir=$PCI_ROOT/tmp" timeout "${secs}s" "$sdkm" --install \
-    "system-images;android-${EMU[0]};${EMU[1]};${EMU[2]}" "emulator" "platform-tools" < <(yes 2>/dev/null) 3>&- || return 1
-  chmod -R go-w "$sdk/system-images" "$sdk/emulator" "$sdk/platform-tools"   # ما ثُبّت يبقى للعدّاء بلا كتابةٍ لغيره
+  # ⛔ المشرفُ يجري بـumask 077 ⇒ ما يثبّته sdkmanager يصير 600/700 فلا يقرؤه مستخدمُ البناء الذي يُقلع المحاكي (وقع فعلاً: التجربة
+  #    dry-run-emu 42282855425 «الإقلاع ⛔» ومسبارُها 13/18). فالتثبيتُ بـumask 022 ثمّ: للعدّاء وحده الكتابة، وللجميع القراءةُ والعبور.
+  ( umask 022; SDKMANAGER_OPTS="-Djava.io.tmpdir=$PCI_ROOT/tmp" timeout "${secs}s" "$sdkm" --install \
+    "system-images;android-${EMU[0]};${EMU[1]};${EMU[2]}" "emulator" "platform-tools" < <(yes 2>/dev/null) 3>&- ) || return 1
+  chmod -R go-w,a+rX "$sdk/system-images" "$sdk/emulator" "$sdk/platform-tools"   # ما ثُبّت يبقى للعدّاء بلا كتابةٍ لغيره ويُقرأ
 }
 
 # ───── أ2 (الإصلاح الخامس · قياسُ Codex 14): مسبارُ المحاكي الحيّ — طورٌ موثوقٌ بحساب العدّاء في التجربة dry-run-emu وحدها ─────
@@ -428,8 +430,14 @@ wait_file(){ local i; for i in $(seq 1 50); do
 ge1(){ [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ]; }
 
 emu_probe(){ # $1 الثواني
-  local secs="$1" n=0 ok=0 bad="" a e f l5 lp boot echo_r bdir broker sens grp cpid bpid spid tool t out ctl_ok=0 thru=0
+  local secs="$1" n=0 ok=0 bad="" a e f l5 lp boot echo_r bdir broker sens grp cpid bpid spid tool t out ctl_ok=0 thru=0 sdk img u k v
   ep(){ n=$((n + 1)); if "$@"; then ok=$((ok + 1)); else bad="${bad:+$bad,}$n"; fi; }
+  # تشخيصٌ علنيٌّ بأعدادٍ وجملٍ ثابتة (لا مسار): ما يحتاجه مستخدمُ البناء ليُقلع المحاكي — يُطبع ولا يُعدّ في الحكم
+  sdk="$(readlink -f "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}")"; img="$sdk/system-images/android-${EMU[0]}/${EMU[1]}/${EMU[2]}"
+  u="$(as_builder find "$img" "$sdk/emulator" "$sdk/platform-tools" ! -readable 2>/dev/null | wc -l)"
+  as_builder test -r /dev/kvm -a -w /dev/kvm >/dev/null 2>&1 && k=✅ || k=⛔
+  as_builder test -f "$BHOME/.android/avd/pci.avd/config.ini" >/dev/null 2>&1 && v=✅ || v=⛔
+  pub "المحاكي: تشخيص — ملفّاتٌ غيرُ مقروءةٍ لمستخدم البناء في الصورة والمحاكي وأدوات المنصّة: $u · /dev/kvm $k · AVD $v"
   # أ. هويّةُ العمليّات أثناء التشغيل
   read -r a e f <<<"$(emu_procs)"
   pub "المحاكي: أثناء التشغيل — adb بمستخدم البناء $a · المحاكي/qemu بمستخدم البناء $e · ADB/المحاكي بحسابٍ آخر $f"
@@ -496,10 +504,10 @@ emu_probe(){ # $1 الثواني
   pub "المحاكي: بعد الإيقاف — adb بمستخدم البناء $a · المحاكي/qemu بمستخدم البناء $e · بحسابٍ آخر $f"
   ep [ "$a" = 0 ]; ep [ "$e" = 0 ]; ep [ "$f" = 0 ]
   kill "$bpid" "$spid" 2>/dev/null; wait "$bpid" "$spid" 2>/dev/null
+  rm -rf "$bdir"
   if sock_probe; then t=0; else t=1; fi
   pub "المحاكي: بعد الإيقاف — $SOCK_PUB"
   ep [ "$t" = 0 ]
-  rm -rf "$bdir"
   if [ "$ok" = "$n" ]; then pub "مسبارُ المحاكي: ✅ $ok/$n"; return 0; fi
   pub "مسبارُ المحاكي: ⛔ $ok/$n — الفاشل: $bad"; return 1
 }
