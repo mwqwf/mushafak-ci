@@ -298,8 +298,16 @@ def sweeper_violations(text):
 def scope_wf_violations(text):
     v = []
     d = parse(text)
-    if set((d.get("on") or {})) != {"pull_request", "push"}:
-        v.append(f"{SCOPE}: الزنادُ غيرُ pull_request وpush")
+    on = d.get("on") or {}
+    # الزنادُ ثلاثةٌ بعينها: pull_request · push إلى main وحده · workflow_dispatch بلا مدخلات (تشغيلٌ يدويٌّ للفحص نفسِه)
+    if set(on) != {"pull_request", "push", "workflow_dispatch"}:
+        v.append(f"{SCOPE}: الزنادُ غيرُ pull_request وpush وworkflow_dispatch")
+    if (on.get("push") or {}).get("branches") != ["main"] or set(on.get("push") or {}) != {"branches"}:
+        v.append(f"{SCOPE}: push لغير main وحده")
+    if on.get("workflow_dispatch") not in (None, {}):
+        v.append(f"{SCOPE}: workflow_dispatch بمدخلات")
+    if "secrets." in text:
+        v.append(f"{SCOPE}: سرٌّ في الفحص")
     for jid, job in (d.get("jobs") or {}).items():
         if job.get("permissions") != {"contents": "read"}:
             v.append(f"{SCOPE}/{jid}: أذوناتٌ غيرُ contents: read")
@@ -376,6 +384,23 @@ class ScopeNegativeTest(unittest.TestCase):
         sw2 = self.files[SWEEPER].replace("      actions: write\n      contents: read\n", "      actions: write\n      contents: write\n", 1)
         self.assertNotEqual(sw2, self.files[SWEEPER])
         self.assertCaught(dict(self.files, **{SWEEPER: sw2}), "sweeper-perms")
+
+    def test_weakened_scope_guard_is_caught(self):
+        """الزنادُ اليدويُّ أُضيف بقاعدةٍ أدقّ: لا مدخلات · push إلى main وحده · لا سرّ · لا زنادَ رابع."""
+        base = self.files[SCOPE]
+        self.assertEqual(scope_wf_violations(base), [])
+        muts = {
+            "inputs": base.replace("  workflow_dispatch:\n", "  workflow_dispatch:\n    inputs:\n      x:\n        required: false\n", 1),
+            "push-any": base.replace("    branches: [main]\n", "    branches: ['**']\n", 1),
+            "push-tags": base.replace("    branches: [main]\n", "    branches: [main]\n    tags: ['*']\n", 1),
+            "fourth": base.replace("  workflow_dispatch:\n", "  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\n", 1),
+            "secret": base.replace("persist-credentials: false", "persist-credentials: false\n          token: ${{ secrets.X }}", 1),
+            "perms": base.replace("      contents: read\n", "      contents: write\n", 1),
+        }
+        for label, text in muts.items():
+            with self.subTest(label=label):
+                self.assertNotEqual(text, base)
+                self.assertCaught(dict(self.files, **{SCOPE: text}), label)
 
     def test_weakened_private_ci_is_caught(self):
         good = self.files[MAIN]
