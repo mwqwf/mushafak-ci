@@ -279,7 +279,7 @@ ALLOWED_BUILDER_ENV = {
     "CI", "TERM", "LANG", "PYTHONIOENCODING", "GITHUB_WORKFLOW_REF", "PCI_KIND", "PCI_LEG", "PCI_LINT", "PCI_SRC",
     "PCI_BSTATE", "PCI_BDEVICE", "PCI_WHISPER_REF", "PCI_RUN_TAG",
     # أ2: خادمُ ADB والمحاكي بمستخدم البناء بمنفذٍ ومجلّداتٍ خاصّة، ومعاملاتُ المحاكي بأنماطٍ مغلقة
-    "ANDROID_ADB_SERVER_PORT", "ADB_SERVER_SOCKET", "ANDROID_AVD_HOME", "ANDROID_EMULATOR_HOME",
+    "ANDROID_ADB_SERVER_PORT", "ANDROID_AVD_HOME", "ANDROID_EMULATOR_HOME",
     "PCI_EMU_API", "PCI_EMU_TARGET", "PCI_EMU_ARCH", "PCI_EMU_PROFILE", "PCI_EMU_RAM",
     # يضبطها build.sh نفسُه (مصارفُ مهملةٌ داخل مجلّد البناء) وبيئةُ bash الذاتيّة
     "GITHUB_STEP_SUMMARY", "GITHUB_ENV", "GITHUB_OUTPUT", "GITHUB_PATH", "GITHUB_STATE", "PWD", "OLDPWD", "SHLVL", "_",
@@ -1028,6 +1028,8 @@ class SupervisorTest(unittest.TestCase):
         # درسُ التجربة 42282855425: صورةُ النظام تُثبَّت بـumask 022 وتُفتح للقراءة (المشرفُ بـumask 077 وإلا فلا يقرؤها مستخدمُ البناء)
         si = code[code.index("emu_sysimg(){"):code.index("run_runner_phase(){")]
         self.assertIn('( umask 022; SDKMANAGER_OPTS=', si)
+        # ودرسُ 42283857840: ADB_SERVER_SOCKET بعنوانٍ رقميّ يجعل adb يرفض تشغيلَ خادمه («remote host») ⇒ المنفذُ وحده
+        self.assertNotIn('"ADB_SERVER_SOCKET=', code)
         self.assertIn('chmod -R go-w,a+rX "$sdk/system-images" "$sdk/emulator" "$sdk/platform-tools"', si)
 
 class IsoProbeTest(unittest.TestCase):
