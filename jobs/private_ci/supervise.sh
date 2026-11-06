@@ -59,7 +59,9 @@ pub(){ printf '%s\n' "$*" >&3; }
 say(){ printf '▸ %s [%s] %s\n' "$(date -u +%H:%M:%S)" "$MODE" "$*"; }
 rc_set(){ printf '%s\n' "$2" > "$PCI_STATE/rc_$1"; }
 ran_add(){ printf '%s\n' "$1" >> "$PCI_STATE/ran.txt"; }
-cs(){ python3 "$PCI_CTL/counts_schema.py" "$@" ${KINDS_ARGS[@]+"${KINDS_ARGS[@]}"}; }
+# ⛔ python3 المشرف يجري بعد أطوارٍ غيرِ موثوقة على الآلة نفسها ⇒ `-I -S`: لا PYTHONPATH ولا site ولا .pth ولا sitecustomize من مجلّداتٍ قد تُفتح
+#    (والفحصُ 12 من فحوص العزل يُثبت أنّ pcibuild لا يكتب في مسار وحداته). السكربتاتُ تستورد المكتبةَ القياسيّة وحدها أو جارَها بـsys.path صراحةً.
+cs(){ python3 -I -S "$PCI_CTL/counts_schema.py" "$@" ${KINDS_ARGS[@]+"${KINDS_ARGS[@]}"}; }
 
 # ───── بيئةُ البناء: قائمةٌ مسموحةٌ وحدها (env -i) — لا GITHUB_* غيرُ المرجع، ولا ACTIONS_*، ولا رمز ─────
 BENV=()
@@ -116,17 +118,24 @@ setup_builder(){ # ⛔ يجري قبل أوّل سطرٍ غيرِ موثوق —
 }
 setup_fail(){ pub "التهيئة: ⛔ $1"; echo 1; }   # رمزٌ ثابتٌ علناً (لا مسارَ ولا اسمَ مستخدمٍ ولا مخرجاتِ أمر) ويعيد رمزَ الفشل للـreturn
 
-harden_path_dirs(){ # D11: كلُّ مجلّدٍ في PATH الوظيفة يكتب فيه pcibuild يُملَّك للعدّاء بلا كتابةٍ لغيره
-  # (وإلا وضع فيه `bash` أو `sudo` أو `python3` مزيَّفاً تنفّذه خطواتٌ موثوقةٌ بصلاحية runner)
-  local me d rd; me="$(id -un)"
+harden_path_dirs(){ # D11: كلُّ مجلّدٍ في PATH الوظيفة **أو في مسار المشرف الثابت** يكتب فيه pcibuild يُجرَّد من كتابة الغير قبل أوّل سطرٍ غيرِ موثوق
+  # (وإلا وضع فيه `bash` أو `sudo` أو `python3` مزيَّفاً تنفّذه خطواتٌ موثوقةٌ بصلاحية runner — والعدّاءُ نفسُه يبحث في PATH الوظيفة عن bash لكلّ خطوة)
+  # ⛔ لا استثناءَ للمجلّدات النظاميّة: صورةُ العدّاء تجعل /usr/local/bin مفتوحاً للكتابة للجميع، وهو يسبق /usr/bin في المسارين
+  #    (وقعت فعلاً: التجربة الجافّة 42250728242 — «مواضعُ PATH الكاتبة: 10,18» وسقوطُ الفحص 8). النظاميُّ يبقى لـroot ويُنزَع منه o+w فقط؛
+  #    وغيرُه يُملَّك للعدّاء. والفشلُ يُعلَن بموضع المجلّد لا باسمه (كما يفعل الفحصُ 8)، ويُعاد الفحصُ بعد التحصين فلا يُكمَل على مجلّدٍ ما زال يُكتب.
+  local me d rd pos=0; me="$(id -un)"
   local IFS=:
-  for d in $JOB_PATH; do
+  for d in $JOB_PATH:$PATH; do
+    pos=$((pos + 1))
     [ -n "$d" ] && [ -d "$d" ] || continue
     rd="$(readlink -f "$d")"
-    case "$rd" in /|/usr|/usr/bin|/usr/sbin|/bin|/sbin|/usr/local|/usr/local/bin|/usr/local/sbin) continue ;; esac  # نظاميّةٌ مملوكةٌ لـroot: تُختبر لا تُمسّ
-    if as_builder test -w "$rd" >/dev/null 2>&1; then
-      sudo -n chown -R -H "$me:$me" "$rd" && sudo -n chmod -R o-w "$rd" || return 1
-    fi
+    as_builder test -w "$rd" >/dev/null 2>&1 || continue
+    case "$rd" in
+      /|/usr|/usr/local|/opt|/home|/snap) sudo -n chmod o-w "$rd" ;;   # جذرٌ واسع: المجلّدُ نفسُه فقط (لا تجوّلَ فيه)
+      /usr/bin|/usr/sbin|/bin|/sbin|/usr/local/bin|/usr/local/sbin|/usr/games|/usr/local/games|/snap/bin) sudo -n chmod -R o-w "$rd" ;;   # نظاميٌّ: يبقى لـroot
+      *) sudo -n chown -R -H "$me:$me" "$rd" && sudo -n chmod -R o-w "$rd" ;;
+    esac || { pub "التهيئة: ⛔ path-harden $pos"; return 1; }
+    if as_builder test -w "$rd" >/dev/null 2>&1; then pub "التهيئة: ⛔ path-still-writable $pos"; return 1; fi
   done
   return 0
 }
@@ -158,6 +167,8 @@ isolation_tests(){ # يضبط ISO_N وISO_OK؛ ما يجب أن يفشل وما 
   must_pass bash -c 'test -x "$JAVA_HOME/bin/java"'
   must_pass bash -c 'test -r "$ANDROID_HOME" && ls "$ANDROID_HOME" >/dev/null'
   must_pass bash -c 'touch "$HOME/.probe"'
+  # 12) مسارُ وحدات python3 الذي يستعمله المشرفُ بعد البناء (بـ-I -S) لا يكتب فيه pcibuild — وبصرامة: غيابُ python3 عنه فشلٌ لا نجاح
+  must_fail bash -c 'python3 -I -S -c "import os,sys; sys.exit(0 if any(os.access(p, os.W_OK) for p in sys.path if p and os.path.isdir(p)) else 3)"; [ $? -ne 3 ]'
   rm -f "$sdk/.pci_probe" "$tc/.pci_probe" 2>/dev/null || true   # لو نجحت كتابةٌ (عزلٌ مفقود) لا يبقى أثر
 }
 
@@ -321,12 +332,12 @@ do_finalize(){
     say "⛔ تعذّرت كتابةُ counts.json"; ready=false
   fi
   # عدُّ ما في السجلّ الخاصّ من أسطرٍ حسّاسة (يُكتب في السجلّ نفسِه قبل تشفيره — لا يُنشر)
-  python3 "$PCI_CTL/guard.py" --report --label "السجلّ الخاص" "$PCI_OUT/log.txt" || true
+  python3 -I -S "$PCI_CTL/guard.py" --report --label "السجلّ الخاص" "$PCI_OUT/log.txt" || true
   if [ "$ready" = true ]; then
     bash "$PCI_CTL/encrypt_log.sh" encrypt || { say "⛔ تعذّر التشفير"; ready=false; }
   fi
   if [ "$ready" = true ]; then
-    python3 "$PCI_CTL/artifact_check.py" "$PCI_ART" --kind "$PCI_KIND" --leg "$PCI_LEG" --sha "$PCI_SHA" \
+    python3 -I -S "$PCI_CTL/artifact_check.py" "$PCI_ART" --kind "$PCI_KIND" --leg "$PCI_LEG" --sha "$PCI_SHA" \
       ${KINDS_ARGS[@]+"${KINDS_ARGS[@]}"} || ready=false
   fi
   if [ "$ready" = true ]; then pub "الناتج: ✅ جاهزٌ للرفع"; else pub "الناتج: ⛔ غيرُ جاهزٍ — لا رفع"; fi
