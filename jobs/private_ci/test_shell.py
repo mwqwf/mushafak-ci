@@ -623,6 +623,24 @@ class SupervisorTest(unittest.TestCase):
         r = self.sup("prepare")
         self.assertEqual(r.returncode, 0)
 
+    def test_sudo_restriction_is_one_sudo_call_and_setup_steps_are_public(self):
+        """chown يمسح بِتَّ setuid من ثنائيّ sudo (لينكس يعامل root كغيره) ⇒ chown وchmod 4750 في استدعاء sudo واحد، وإلا عجز
+        الأمرُ الثاني وسقطت التهيئةُ كلُّها (وقعت فعلاً: التجربة الجافّة 42248836438). وكلُّ خطوةٍ في setup_builder تُعلن رمزَها علناً عند الفشل."""
+        body = readf(os.path.join(HERE, "supervise.sh"))
+        code = "\n".join(ln for ln in body.splitlines() if not ln.lstrip().startswith("#"))
+        fn = code[code.index("setup_builder(){"):code.index("harden_path_dirs(){")]
+        one_call = "sudo -n sh -c 'chown \"root:$2\" \"$1\" && chmod 4750 \"$1\"' _ \"$sb\" \"$(id -g)\""
+        self.assertIn(one_call, fn)
+        self.assertNotRegex(fn, r'sudo -n chown [^\n]*"\$sb"')       # لا chown منفصلٌ لثنائيّ sudo
+        self.assertNotRegex(fn, r'sudo -n chmod 4750')                # ولا chmod منفصل
+        self.assertLess(fn.index("chmod 4750"), fn.index("sudo -n true"))   # ثمّ تحقّقٌ أنّ sudo العدّاء ما زال يعمل
+        # كلُّ سطرِ sudo في التهيئة ينتهي برمزِ فشلٍ علنيّ ثابت (كلمةٌ من حروفٍ وشرطات، لا مسار)
+        sudo_lines = [ln for ln in fn.splitlines() if ln.lstrip().startswith("sudo -n ")]
+        self.assertGreaterEqual(len(sudo_lines), 9)
+        for ln in sudo_lines:
+            self.assertRegex(ln, r'setup_fail [a-z][a-z-]*\)', ln)
+        self.assertIn('setup_fail(){ pub "التهيئة: ⛔ $1"; echo 1; }', code)
+
     def test_supervisor_refuses_unknown_mode_and_missing_tools(self):
         r = self.sup("prepare")
         self.assertEqual(r.returncode, 0)
