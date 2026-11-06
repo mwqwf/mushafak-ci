@@ -169,8 +169,16 @@ class KindsTest(unittest.TestCase):
                     self.assertFalse(p["id"].startswith("selftest_"), "طورٌ تجريبيٌّ في الإنتاج")
                     self.assertIs(type(p["emu"]), bool)
                     self.assertIs(type(p["optional"]), bool)
-                # أطوارُ المشرف الثابتةُ اثنان فقط (disk وkvm) وتسبق طورَ المحاكي
-                self.assertTrue({p["id"] for p in phases if p["who"] == "runner"} <= {"disk", "kvm"})
+                # أطوارُ المشرف الثابتةُ ثلاثةٌ فقط (sysimg · disk · kvm) وتسبق طورَ المحاكي
+                self.assertTrue({p["id"] for p in phases if p["who"] == "runner"} <= {"sysimg", "disk", "kvm"})
+                # أ2: نوعٌ بمحاكٍ يبدأ بـsysimg (قبل أيّ طورٍ غيرِ موثوق) وأوّلُ أطوار المحاكي emu_up بمستخدم البناء
+                if any(p["emu"] for p in phases):
+                    self.assertEqual(phases[0], {"id": "sysimg", "who": "runner", "emu": False, "optional": False})
+                    first_emu = next(p for p in phases if p["emu"])
+                    self.assertEqual(first_emu, {"id": "emu_up", "who": "builder", "emu": True, "optional": False})
+                else:
+                    self.assertNotIn("sysimg", ids)
+                    self.assertNotIn("emu_up", ids)
                 # كلُّ طورٍ يجري داخل خطوة المحاكي يتبع كلَّ ما قبله
                 flags = [p["emu"] for p in phases]
                 self.assertEqual(flags, sorted(flags), "طورٌ بلا محاكٍ بعد طورٍ بمحاكٍ")
@@ -181,20 +189,21 @@ class KindsTest(unittest.TestCase):
     def test_known_orderings_match_v2(self):
         order = {k: [p["id"] for p in v["phases"]] for k, v in KINDS.items()}
         self.assertEqual(order["app-test"], ["app_guide", "no_blocking", "back_handling", "i18n_verify", "i18n_locale", "gradle"])
-        self.assertEqual(order["tasmi-model-emulator-smoke"], ["whisper", "fatiha", "disk", "kvm", "emu"])
-        self.assertEqual(order["device-matrix"], ["whisper", "fatiha", "gradle", "lint", "disk", "kvm", "emu_smoke", "emu_tasmi"])
+        self.assertEqual(order["tasmi-model-emulator-smoke"], ["sysimg", "whisper", "fatiha", "disk", "kvm", "emu_up", "emu"])
+        self.assertEqual(order["device-matrix"], ["sysimg", "whisper", "fatiha", "gradle", "lint", "disk", "kvm", "emu_up",
+                                                  "emu_smoke", "emu_tasmi"])
         self.assertEqual(order["dry-run"], ["unit"])
         self.assertEqual(order["engine-test"], ["pip", "fixture_selftest", "fixture_audit", "ffmpeg", "phoneme_gold", "jni", "gradle"])
 
     def test_phases_for_modes_and_lint(self):
         self.assertEqual(cs.phases_for(KINDS, "device-matrix", "a24-small-x86", "build"),
-                         [("whisper", "builder"), ("fatiha", "builder"), ("gradle", "builder"), ("lint", "builder"),
-                          ("disk", "runner"), ("kvm", "runner")])
+                         [("sysimg", "runner"), ("whisper", "builder"), ("fatiha", "builder"), ("gradle", "builder"),
+                          ("lint", "builder"), ("disk", "runner"), ("kvm", "runner")])
         self.assertEqual(cs.phases_for(KINDS, "device-matrix", "a26-phone", "build"),
-                         [("whisper", "builder"), ("fatiha", "builder"), ("gradle", "builder"), ("disk", "runner"),
-                          ("kvm", "runner")])
+                         [("sysimg", "runner"), ("whisper", "builder"), ("fatiha", "builder"), ("gradle", "builder"),
+                          ("disk", "runner"), ("kvm", "runner")])
         self.assertEqual(cs.phases_for(KINDS, "device-matrix", "a26-phone", "emu"),
-                         [("emu_smoke", "builder"), ("emu_tasmi", "builder")])
+                         [("emu_up", "builder"), ("emu_smoke", "builder"), ("emu_tasmi", "builder")])
         self.assertEqual(cs.phases_for(KINDS, "app-test", "main", "emu"), [])
         with self.assertRaises(cs.SchemaError):
             cs.phases_for(KINDS, "app-test", "nope", "build")
@@ -279,6 +288,51 @@ class EmitTest(unittest.TestCase):
                 c = json.load(f)
             self.assertEqual((c["ran"], c["ok"]), (["isolation"], False))
 
+    def test_emit_does_not_read_the_tree_after_failed_cleanup_or_with_no_tree(self):
+        """أ3: تنظيفٌ فاشل (rc_cleanup≠0) أو --no-tree ⇒ لا يُقرأ JUnit ولا ملفّاتُ الجهاز أصلاً (والشوطُ يسقط بفشل cleanup)."""
+        with tempfile.TemporaryDirectory() as d:
+            st, src = os.path.join(d, "st"), os.path.join(d, "src")
+            os.makedirs(st)
+            base = os.path.join(src, "app", "build", "test-results", "t"); os.makedirs(base)
+            put(os.path.join(base, "a.xml"), junit_xml(5))
+            ran, rcs = full_rcs("app-test")
+            ran = ran + ["cleanup"]
+
+            def emit(cleanup_rc, *extra):
+                put(os.path.join(st, "ran.txt"), ("\n".join(ran) + "\n").encode())
+                for k, v in dict(rcs, cleanup=cleanup_rc).items():
+                    put(os.path.join(st, "rc_" + k), f"{v}\n".encode())
+                out = os.path.join(d, "c.json")
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(cs.main(["emit", "--state", st, "--src", src, "--kind", "app-test", "--leg", "main",
+                                              "--sha", SHA, "--out", out] + list(extra)), 0)
+                with open(out, "rb") as f:
+                    return json.loads(f.read())
+            ok = emit(0)
+            self.assertEqual((ok["tests"], ok["reports"]), (5, 1))
+            bad = emit(1)
+            self.assertEqual((bad["tests"], bad["reports"], bad["ok"]), (0, 0, False))
+            self.assertIn("cleanup", bad["failed_phase_ids"])
+            nt = emit(0, "--no-tree")
+            self.assertEqual((nt["tests"], nt["reports"]), (0, 0))
+
+    def test_emu_params_are_closed_patterns(self):
+        """أ2: معاملاتُ المحاكي تصل إلى بيئة البناء ⇒ خمسٌ بأنماطٍ مغلقة لكلّ شوطٍ بمحاكٍ، ولا شيءَ لغيره، وأيُّ انحرافٍ يُرفض."""
+        for kind, spec in KINDS.items():
+            for leg in spec["legs"]:
+                got = cs.emu_params(KINDS, kind, leg["id"])
+                self.assertEqual(len(got), 5 if "emu" in leg else 0, (kind, leg["id"]))
+        self.assertEqual(cs.emu_params(KINDS, "device-matrix", "a24-small-x86"), ["24", "default", "x86", "Nexus S", "1024M"])
+        for field, bad in (("profile", "pixel;id"), ("profile", "a$(x)"), ("target", "Google APIs"), ("arch", "arm64"),
+                           ("api", "3"), ("ram", "2G"), ("ram", "2048M\n")):
+            k = json.loads(json.dumps(KINDS))
+            k["ads-emulator-smoke"]["legs"][0]["emu"][field] = bad
+            with self.subTest(field=field, bad=bad), self.assertRaises(cs.SchemaError):
+                cs.emu_params(k, "ads-emulator-smoke", "api29")
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(cs.main(["emu", "--kind", "ads-emulator-smoke", "--leg", "api34"]), 0)
+        self.assertEqual(out.getvalue().splitlines(), ["34", "google_apis", "x86_64", "pixel_2", "2048M"])
+
     def test_emit_rejects_unknown_kind(self):
         with tempfile.TemporaryDirectory() as d, contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(cs.main(["emit", "--state", d, "--kind", "nope", "--leg", "main", "--sha", SHA,
@@ -353,6 +407,25 @@ class JunitSafetyTest(unittest.TestCase):
             self.tree(d, {"a.xml": b'<testsuite tests="99999999999999999999" failures="x"/>'})
             t, f, e, s, r = cs.junit(d, "app-test")
             self.assertEqual((t, f, r), (cs.MAX_INT, 0, 1))
+
+    def test_hard_link_fifo_and_symlinked_device_dir_are_not_read(self):
+        """أ3: ملفٌّ بأكثرَ من رابطٍ صلب (قد يكون ملفّاً خارج الشجرة) لا يُقرأ؛ وFIFO باسم .xml لا يعلّق القراءةَ (O_NONBLOCK)؛
+        ومجلّدُ الجهاز الرمزيّ لا يُتبع."""
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as other:
+            outside = os.path.join(other, "o.xml")
+            put(outside, junit_xml(999))
+            base = self.tree(d, {"a.xml": junit_xml(2)})
+            os.link(outside, os.path.join(base, "hard.xml"))
+            os.mkfifo(os.path.join(base, "pipe.xml"))
+            t, f, e, s, r = cs.junit(d, "app-test")
+            self.assertEqual((t, r, e), (2, 1, 2))
+            dev = os.path.join(other, "dev"); os.makedirs(dev)
+            put(os.path.join(dev, "result.md"), "✅".encode())
+            put(os.path.join(dev, "tasmi.md"), "التسميع: ✅\n".encode())
+            self.assertEqual(cs.device_results(dev), (2, 0))
+            os.symlink(dev, os.path.join(d, "devlink"))
+            self.assertEqual(cs.device_results(os.path.join(d, "devlink")), (2, 2))
+            self.assertEqual(cs.junit("relative/path", "app-test"), (0, 0, 0, 0, 0))   # المسارُ يجب أن يكون مطلقاً
 
     def test_device_results_ignore_links(self):
         with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as other:

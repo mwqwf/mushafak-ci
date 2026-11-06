@@ -6,12 +6,15 @@
 
 الأوامر:
   emit     — في المشرف (finalize · v3): يعدّ رموزَ خروج الأطوار (التي سجّلها المشرفُ بنفسه) وتقاريرَ JUnit من شجرة البناء
-             (ملفّاتٌ عاديّةٌ فقط · لا روابط · بحدّ حجمٍ وعدد) ويكتب counts.json بالمخطّط (الإصدار 2: ran).
+             (ملفّاتٌ عاديّةٌ فقط · لا روابط في أيّ مكوّنٍ من الجذر · O_NOFOLLOW وfstat ورابطٌ واحد · بحدّ حجمٍ وعدد) ويكتب counts.json
+             بالمخطّط (الإصدار 2: ran). ⛔ أ3: إن فشل التنظيف (بقيت عمليّةٌ للبناء) أو مُرّر --no-tree **لا تُقرأ الشجرةُ أصلاً**.
   validate — في publish: يتحقّق من ملفٍّ نزل في الـArtifact ويطبع «صالح/مرفوض» ورمزَ السبب فقط.
   phases   — للمشرف: أطوارُ النوع والشوط لوضعٍ (build|emu) سطراً لكلّ طور «id who».
   timeout  — للمشرف: مهلةُ الشوط بالدقائق.
+  emu      — للمشرف (أ2): معاملاتُ المحاكي للشوط خمسةَ أسطر (api · target · arch · profile · ram) بأنماطٍ مغلقة، أو لا شيء.
 """
 import argparse
+import errno
 import json
 import os
 import re
@@ -37,12 +40,15 @@ PHASES = frozenset({
     "fixture_selftest", "fixture_audit", "ffmpeg", "phoneme_gold", "jni", "whisper", "fatiha", "disk", "kvm",
     "request", "bundletool", "lint", "emu", "emu_smoke", "emu_tasmi", "kind", "unknown",
     "isolation", "cleanup",
+    # أ2: صورةُ النظام (أمرٌ ثابتٌ بحساب العدّاء قبل أيّ طورٍ غيرِ موثوق) وإقلاعُ المحاكي وخادم ADB بمستخدم البناء
+    "sysimg", "emu_up",
     # أطوارٌ تجريبيّةٌ للاختبار المحلّيّ وحده (kinds.json الإنتاجيّ لا يذكرها — يفرض ذلك test_counts_schema)
     "selftest_ok", "selftest_fail", "selftest_noisy", "selftest_forge", "selftest_env",
+    "selftest_tamper", "selftest_linger", "selftest_hold", "selftest_sleep", "selftest_limits",
 })
 # أطوارُ تجهيزٍ لا تُعدّ «اختباراً» حين لا تقرير JUnit (لكنّ فشلَها يُسقط الشوط).
 PREP = frozenset({"clone", "gradle", "pip", "ffmpeg", "whisper", "fatiha", "disk", "kvm", "bundletool", "request",
-                  "lint", "kind", "isolation", "cleanup"})
+                  "lint", "kind", "isolation", "cleanup", "sysimg", "emu_up"})
 # lint لا يُسقط الشوط (كما في device-matrix.yml الأصليّ: يُعدّ والحكمُ على المحاكيات).
 NON_FATAL = frozenset({"lint"})
 XML_DIRS = {
@@ -54,6 +60,12 @@ XML_DIRS = {
 }
 # أنواعٌ بلا JUnit (أو بعضُها): كلُّ طورٍ مسمّى غيرِ تجهيزيّ يُعدّ اختباراً واحداً.
 PHASE_COUNTED = frozenset({"dry-run", "engine-test", "hudhud-feature-test", "device-matrix"})
+
+
+# أ2: معاملاتُ المحاكي تصل إلى بيئة البناء — فبأنماطٍ مغلقةٍ وحدها
+EMU_FIELDS = (("api", re.compile(r"[0-9]{2}")), ("target", re.compile(r"[a-z_]{1,32}")),
+              ("arch", re.compile(r"x86|x86_64")), ("profile", re.compile(r"[A-Za-z0-9 _]{1,32}")),
+              ("ram", re.compile(r"[0-9]{3,5}M")))
 
 
 class SchemaError(ValueError):
@@ -176,36 +188,83 @@ def phases_for(kinds, kind, leg_id, mode):
 
 
 # ───── emit (المشرف) ─────
-def _lstat_dir(path):
-    try:
-        return stat.S_ISDIR(os.lstat(path).st_mode)
-    except OSError:
-        return False
+# أ3: قراءةٌ لا تتبع رابطاً رمزيّاً في أيّ مكوّن: المجلّداتُ تُفتح مكوّناً مكوّناً من الجذر بـO_NOFOLLOW نسبةً إلى واصف الأب،
+#     والملفُّ يُفتح بـO_NOFOLLOW|O_NONBLOCK ثمّ fstat: عاديٌّ · رابطٌ واحد · ضمن الحدّ · ولم يتغيّر بين البدء والنهاية.
+_O_DIR = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+_O_FILE = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
 
 
-def _safe_join(base, rel):
-    """يمشي مكوّناتِ rel من base ويرفض أيَّ رابطٍ رمزيٍّ أو غيرِ مجلّد في الطريق؛ يُعيد المسارَ أو None."""
-    cur = base
-    if not _lstat_dir(cur):
-        return None
-    for part in [p for p in rel.split("/") if p]:
-        cur = os.path.join(cur, part)
-        if not _lstat_dir(cur):
+def _open_dir(path, base_fd=None):
+    """واصفُ مجلّدٍ بمشي مكوّناته (من الجذر لمسارٍ مطلق، أو من base_fd لمسارٍ نسبيّ) بلا اتّباع أيّ رابط؛ None عند أيّ مخالفة."""
+    if base_fd is None:
+        if not isinstance(path, str) or not path.startswith("/"):
             return None
-    return cur
+        try:
+            fd = os.open("/", _O_DIR)
+        except OSError:
+            return None
+    else:
+        fd = os.dup(base_fd)
+    try:
+        for part in [p for p in path.split("/") if p]:
+            if part in (".", ".."):
+                raise OSError(errno.EINVAL, "dot")
+            nfd = os.open(part, _O_DIR, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
+
+
+def _lstat_dir(path):
+    fd = _open_dir(path)
+    if fd is None:
+        return False
+    os.close(fd)
+    return True
+
+
+def _read_regular_at(dir_fd, name, cap):
+    """بايتاتُ ملفٍّ عاديٍّ داخل dir_fd بحدّ cap؛ None إن كان رابطاً أو غيرَ عاديّ أو بأكثرَ من رابطٍ واحد أو تجاوز الحدّ أو تغيّر."""
+    try:
+        fd = os.open(name, _O_FILE, dir_fd=dir_fd)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size > cap:
+            return None
+        chunks, total = [], 0
+        while total <= cap:
+            b = os.read(fd, min(1 << 20, cap + 1 - total))
+            if not b:
+                break
+            chunks.append(b)
+            total += len(b)
+        st2 = os.fstat(fd)
+        if total > cap or (st2.st_ino, st2.st_dev, st2.st_size, st2.st_nlink) != (st.st_ino, st.st_dev, total, 1):
+            return None
+        return b"".join(chunks)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
 
 
 def _read_regular(path, cap):
-    """بايتاتُ ملفٍّ عاديٍّ (لا رابطاً) بحدّ cap؛ None إن لم يكن عاديّاً أو تجاوز الحدّ."""
-    try:
-        st = os.lstat(path)
-        if not stat.S_ISREG(st.st_mode) or st.st_size > cap:
-            return None
-        with open(path, "rb") as f:
-            data = f.read(cap + 1)
-    except OSError:
+    """مسارٌ مطلق: مجلّدُه بلا روابط من الجذر ثمّ الملفُّ نفسُه بـ_read_regular_at."""
+    head, name = os.path.split(path)
+    dfd = _open_dir(head)
+    if dfd is None or not name:
+        if dfd is not None:
+            os.close(dfd)
         return None
-    return data if len(data) <= cap else None
+    try:
+        return _read_regular_at(dfd, name, cap)
+    finally:
+        os.close(dfd)
 
 
 def read_ran(state):
@@ -239,42 +298,62 @@ def read_rcs(state, ran=None):
 
 
 def junit(src, kind):
-    """مجموعُ تقارير JUnit من شجرة البناء: ملفّاتٌ عاديّةٌ فقط (lstat) بلا اتّباع روابط، بحدّ 16 م.ب للملفّ و10,000 ملفّ.
-    ما خالف (رابطٌ · كبيرٌ · DOCTYPE/ENTITY · غيرُ مقروء) يُعدّ عطباً واحداً ولا يُقرأ."""
+    """مجموعُ تقارير JUnit من شجرة البناء: ملفّاتٌ عاديّةٌ فقط بلا اتّباع روابط (os.fwalk بواصفاتٍ لا بمسارات)، بحدّ 16 م.ب
+    للملفّ و10,000 ملفّ. ما خالف (رابطٌ أيّاً كان · كبيرٌ · رابطٌ صلب · DOCTYPE/ENTITY · غيرُ مقروء) يُعدّ عطباً واحداً ولا يُقرأ."""
     t = f = e = s = reports = 0
     seen = 0
-    for rel in XML_DIRS.get(kind, []):
-        top = _safe_join(src, rel)
-        if top is None:
-            continue
-        for dirpath, dirnames, filenames in os.walk(top, followlinks=False):
-            for dn in list(dirnames):          # مجلّدٌ رمزيٌّ لا يُنزَل إليه (os.walk لا يتبعه أصلاً)؛ يُسجَّل عطباً
-                if not _lstat_dir(os.path.join(dirpath, dn)):
-                    dirnames.remove(dn)
-                    e += 1
-            seen += len(dirnames)
-            for fn in filenames:
-                seen += 1
-                if seen > MAX_XML_FILES:
-                    return t, f, min(e + 1, MAX_INT), s, reports
-                if not fn.endswith(".xml"):
-                    continue
-                data = _read_regular(os.path.join(dirpath, fn), MAX_XML_BYTES)
-                if data is None or b"<!ENTITY" in data or b"<!DOCTYPE" in data:
-                    e += 1
-                    continue
-                try:
-                    r = ET.fromstring(data)
-                except ET.ParseError:
-                    e += 1
-                    continue
-                if r.tag not in ("testsuite", "testsuites"):
-                    continue
-                reports += 1
-                t += _int_attr(r, "tests")
-                f += _int_attr(r, "failures")
-                e += _int_attr(r, "errors")
-                s += _int_attr(r, "skipped")
+    root = _open_dir(src)
+    if root is None:
+        return t, f, e, s, reports
+    try:
+        for rel in XML_DIRS.get(kind, []):
+            top = _open_dir(rel, root)
+            if top is None:
+                continue
+            try:
+                for _dp, dirnames, filenames, dfd in os.fwalk(".", dir_fd=top, follow_symlinks=False):
+                    seen += len(dirnames)
+                    for dn in list(dirnames):  # مجلّدٌ رمزيٌّ: fwalk لا ينزل إليه؛ ويُعدّ عطباً
+                        try:
+                            if stat.S_ISLNK(os.stat(dn, dir_fd=dfd, follow_symlinks=False).st_mode):
+                                dirnames.remove(dn)
+                                e += 1
+                        except OSError:
+                            dirnames.remove(dn)
+                            e += 1
+                    for fn in filenames:
+                        seen += 1
+                        if seen > MAX_XML_FILES:
+                            return t, f, min(e + 1, MAX_INT), s, reports
+                        try:
+                            is_link = stat.S_ISLNK(os.stat(fn, dir_fd=dfd, follow_symlinks=False).st_mode)
+                        except OSError:
+                            is_link = True
+                        if is_link:            # رابطٌ رمزيٌّ (لملفٍّ أو مجلّد) لا يُتبع ويُعدّ عطباً
+                            e += 1
+                            continue
+                        if not fn.endswith(".xml"):
+                            continue
+                        data = _read_regular_at(dfd, fn, MAX_XML_BYTES)
+                        if data is None or b"<!ENTITY" in data or b"<!DOCTYPE" in data:
+                            e += 1
+                            continue
+                        try:
+                            r = ET.fromstring(data)
+                        except ET.ParseError:
+                            e += 1
+                            continue
+                        if r.tag not in ("testsuite", "testsuites"):
+                            continue
+                        reports += 1
+                        t += _int_attr(r, "tests")
+                        f += _int_attr(r, "failures")
+                        e += _int_attr(r, "errors")
+                        s += _int_attr(r, "skipped")
+            finally:
+                os.close(top)
+    finally:
+        os.close(root)
     return t, f, e, s, reports
 
 
@@ -286,9 +365,13 @@ def _int_attr(node, name):
 
 
 def device_results(device):
-    base = device if device and _lstat_dir(device) else None
-    res = _read_regular(os.path.join(base, "result.md"), MAX_XML_BYTES) if base else None
-    tas = _read_regular(os.path.join(base, "tasmi.md"), MAX_XML_BYTES) if base else None
+    dfd = _open_dir(device) if device else None
+    try:
+        res = _read_regular_at(dfd, "result.md", MAX_XML_BYTES) if dfd is not None else None
+        tas = _read_regular_at(dfd, "tasmi.md", MAX_XML_BYTES) if dfd is not None else None
+    finally:
+        if dfd is not None:
+            os.close(dfd)
     ok1 = res is not None and "✅" in res.decode("utf-8", errors="replace")
     ok2 = tas is not None and bool(re.search(r"^التسميع: ✅", tas.decode("utf-8", errors="replace"), re.M))
     return 2, (0 if ok1 else 1) + (0 if ok2 else 1)
@@ -335,8 +418,10 @@ def cmd_emit(a):
         raise SchemaError("kind")
     ran = read_ran(a.state)
     rcs = read_rcs(a.state, ran)
-    jc = junit(a.src, a.kind) if a.src and _lstat_dir(a.src) else (0, 0, 0, 0, 0)
-    dev = device_results(a.device) if a.kind == "device-matrix" and a.device else None
+    # أ3: تنظيفٌ فاشل (بقيت عمليّةٌ لمستخدم البناء قد تبدّل الشجرةَ أثناء القراءة) ⇒ لا تُقرأ الشجرةُ ولا نتائجُ الجهاز أصلاً
+    tree = not a.no_tree and not ("cleanup" in ran and rcs.get("cleanup", 1) != 0)
+    jc = junit(a.src, a.kind) if tree and a.src and _lstat_dir(a.src) else (0, 0, 0, 0, 0)
+    dev = (device_results(a.device) if tree else (2, 2)) if a.kind == "device-matrix" and a.device else None
     c = make_counts(a.kind, a.leg, a.sha, rcs, jc, dev, ran, kinds)
     raw = json.dumps(c, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
     validate(raw, a.kind, a.leg, a.sha, kinds)  # ما نكتبه نحن يطابق ما سنقبله هناك
@@ -381,6 +466,32 @@ def cmd_timeout(a):
     return 0
 
 
+def emu_params(kinds, kind, leg_id):
+    """أ2: معاملاتُ محاكي الشوط بأنماطٍ مغلقة (قائمةٌ من خمس) أو [] إن لم يكن للشوط محاكٍ؛ وما خالف يرفع SchemaError."""
+    leg = next((x for x in kinds[kind]["legs"] if x["id"] == leg_id), None)
+    if leg is None:
+        raise SchemaError("leg")
+    emu = leg.get("emu")
+    if not emu:
+        return []
+    out = []
+    for name, rx in EMU_FIELDS:
+        v = str(emu.get(name, ""))
+        if not rx.fullmatch(v):
+            raise SchemaError("emu")
+        out.append(v)
+    return out
+
+
+def cmd_emu(a):
+    kinds = load_kinds(a.kinds or None)
+    if a.kind not in kinds:
+        return 2
+    for v in emu_params(kinds, a.kind, a.leg):
+        print(v)
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="مخطّط counts.json")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -393,6 +504,7 @@ def main(argv=None):
     e.add_argument("--sha", required=True)
     e.add_argument("--out", required=True)
     e.add_argument("--kinds", default="")
+    e.add_argument("--no-tree", action="store_true")
     v = sub.add_parser("validate")
     v.add_argument("file")
     v.add_argument("--kind", required=True)
@@ -408,9 +520,14 @@ def main(argv=None):
     t.add_argument("--kind", required=True)
     t.add_argument("--leg", required=True)
     t.add_argument("--kinds", default="")
+    m = sub.add_parser("emu")
+    m.add_argument("--kind", required=True)
+    m.add_argument("--leg", required=True)
+    m.add_argument("--kinds", default="")
     a = ap.parse_args(argv)
     try:
-        return {"emit": cmd_emit, "validate": cmd_validate, "phases": cmd_phases, "timeout": cmd_timeout}[a.cmd](a)
+        return {"emit": cmd_emit, "validate": cmd_validate, "phases": cmd_phases, "timeout": cmd_timeout,
+                "emu": cmd_emu}[a.cmd](a)
     except SchemaError as err:
         print(f"المخطّط: ⛔ ({err})")
         return 1

@@ -1,5 +1,5 @@
 {
-  "_comment": "أنواعُ مهامّ private-ci (v3) وأشواطُها. يقرؤها plan.py وcounts_schema.py وpublish.py وsupervise.sh؛ ولا يُقبل نوعٌ ولا شوطٌ ليس هنا. timeout بالدقائق لكلّ شوط. phases: قائمةُ الأطوار مرتّبةً (id · who: builder يجري بمستخدم pcibuild، runner أمرٌ ثابتٌ في المشرف · emu: يجري داخل خطوة المحاكي · optional: لا يُدرج إلا إن وُسم الشوطُ باسمه مثل lint:true، ولا يُعدّ إلزاميّاً). الأطوارُ غيرُ الاختياريّة (ومعها isolation وclone) إلزاميّةٌ في counts.json (ran). السياقُ public-ci/<النوع> للحالة الواحدة النهائيّة. ⛔ لا recite-switch-emu (يقرأ أسراراً) ولا engine-models (يبقى في الخاص يدويّاً).",
+  "_comment": "أنواعُ مهامّ private-ci (v3) وأشواطُها. يقرؤها plan.py وcounts_schema.py وpublish.py وsupervise.sh؛ ولا يُقبل نوعٌ ولا شوطٌ ليس هنا. timeout بالدقائق لكلّ شوط. phases: قائمةُ الأطوار مرتّبةً (id · who: builder يجري بمستخدم pcibuild، runner أمرٌ ثابتٌ في المشرف · emu: يجري داخل خطوة المحاكي · optional: لا يُدرج إلا إن وُسم الشوطُ باسمه مثل lint:true، ولا يُعدّ إلزاميّاً). الأطوارُ غيرُ الاختياريّة (ومعها isolation وclone) إلزاميّةٌ في counts.json (ran). السياقُ public-ci/<النوع> للحالة الواحدة النهائيّة. أ2 (الإصلاح الرابع): كلُّ نوعٍ بمحاكٍ يبدأ بـsysimg (أمرٌ ثابتٌ بحساب العدّاء يثبّت صورةَ النظام في SDK المحصَّن قبل أيّ طورٍ غيرِ موثوق) ثمّ emu_up أوّلَ أطوار المحاكي: المحاكي وخادمُ ADB يُقلعان **بمستخدم البناء** بمنفذٍ خاصّ — لا إجراءَ محاكٍ بحساب العدّاء؛ ومعاملاتُ emu تُقرأ بأنماطٍ مغلقة (counts_schema emu). ⛔ لا recite-switch-emu (يقرأ أسراراً) ولا engine-models (يبقى في الخاص يدويّاً).",
   "dry-run": {
     "source": "public",
     "phases": [
@@ -41,10 +41,12 @@
   "tasmi-model-emulator-smoke": {
     "source": "private",
     "phases": [
+      {"id": "sysimg", "who": "runner", "emu": false, "optional": false},
       {"id": "whisper", "who": "builder", "emu": false, "optional": false},
       {"id": "fatiha", "who": "builder", "emu": false, "optional": false},
       {"id": "disk", "who": "runner", "emu": false, "optional": false},
       {"id": "kvm", "who": "runner", "emu": false, "optional": false},
+      {"id": "emu_up", "who": "builder", "emu": true, "optional": false},
       {"id": "emu", "who": "builder", "emu": true, "optional": false}
     ],
     "legs": [
@@ -54,10 +56,12 @@
   "ui-shots-emu": {
     "source": "private",
     "phases": [
+      {"id": "sysimg", "who": "runner", "emu": false, "optional": false},
       {"id": "request", "who": "builder", "emu": false, "optional": false},
       {"id": "whisper", "who": "builder", "emu": false, "optional": false},
       {"id": "disk", "who": "runner", "emu": false, "optional": false},
       {"id": "kvm", "who": "runner", "emu": false, "optional": false},
+      {"id": "emu_up", "who": "builder", "emu": true, "optional": false},
       {"id": "emu", "who": "builder", "emu": true, "optional": false}
     ],
     "legs": [
@@ -67,11 +71,13 @@
   "hudhud-feature-test": {
     "source": "private",
     "phases": [
+      {"id": "sysimg", "who": "runner", "emu": false, "optional": false},
       {"id": "whisper", "who": "builder", "emu": false, "optional": false},
       {"id": "gradle", "who": "builder", "emu": false, "optional": false},
       {"id": "bundletool", "who": "builder", "emu": false, "optional": false},
       {"id": "disk", "who": "runner", "emu": false, "optional": false},
       {"id": "kvm", "who": "runner", "emu": false, "optional": false},
+      {"id": "emu_up", "who": "builder", "emu": true, "optional": false},
       {"id": "emu", "who": "builder", "emu": true, "optional": false}
     ],
     "legs": [
@@ -81,9 +87,11 @@
   "ads-emulator-smoke": {
     "source": "private",
     "phases": [
+      {"id": "sysimg", "who": "runner", "emu": false, "optional": false},
       {"id": "whisper", "who": "builder", "emu": false, "optional": false},
       {"id": "disk", "who": "runner", "emu": false, "optional": false},
       {"id": "kvm", "who": "runner", "emu": false, "optional": false},
+      {"id": "emu_up", "who": "builder", "emu": true, "optional": false},
       {"id": "emu", "who": "builder", "emu": true, "optional": false}
     ],
     "legs": [
@@ -94,12 +102,14 @@
   "device-matrix": {
     "source": "private",
     "phases": [
+      {"id": "sysimg", "who": "runner", "emu": false, "optional": false},
       {"id": "whisper", "who": "builder", "emu": false, "optional": false},
       {"id": "fatiha", "who": "builder", "emu": false, "optional": false},
       {"id": "gradle", "who": "builder", "emu": false, "optional": false},
       {"id": "lint", "who": "builder", "emu": false, "optional": true},
       {"id": "disk", "who": "runner", "emu": false, "optional": false},
       {"id": "kvm", "who": "runner", "emu": false, "optional": false},
+      {"id": "emu_up", "who": "builder", "emu": true, "optional": false},
       {"id": "emu_smoke", "who": "builder", "emu": true, "optional": false},
       {"id": "emu_tasmi", "who": "builder", "emu": true, "optional": false}
     ],

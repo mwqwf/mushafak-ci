@@ -1,6 +1,7 @@
 # 🔒 **اختباراتُ المستودع الخاص على عدّاءٍ عامٍّ مجّانيّ — v3** (مراجعة Codex 13-ب · القرارات D11–D20 فوق D1–D10).
 #
-# مصدرُ هذا الملفّ الحقيقيّ: QuranRafiq/ops/ci/runner-repo/ (يُراجَع هناك ويُدفع إلى mwqwf/mushafak-ci بطلب دمجٍ يوافقه المالك).
+# مصدرُ هذا الملفّ الحقيقيّ: QuranRafiq/ops/ci/runner-repo/ (يُراجَع هناك ويُدفع إلى mwqwf/mushafak-ci بطلب دمجٍ بصفر موافقات
+# يمرّ بـscope-guard — فحصٍ ذاتيٍّ للنطاق لا مراجعةٍ مستقلّة؛ والمراجعةُ المستقلّة Codex قبل كلّ تفعيل).
 #
 # ثلاثُ وظائف:
 #   plan    — بلا سرّ: تفحص الحمولة {sha · kind · runner_sha}؛ وتُفشل فوراً إن runner_sha ≠ github.sha (D1-ب: المنفَّذُ
@@ -77,7 +78,8 @@ jobs:
     runs-on: ubuntu-latest
     # 🔑 البيئةُ build (مقيَّدةٌ بـmain من الإعدادات) لا تحمل إلا مفتاحَ القراءة؛ ويدخل خطوةَ «الاستنساخ» وحدها.
     environment: build
-    timeout-minutes: ${{ matrix.leg.timeout }}
+    # أ4: الميزانيةُ (يحسبها المشرفُ من بدئه وتشمل finalize) + هامشٌ لما قبله — فيسبق finalize إيقافَ GitHub دائماً
+    timeout-minutes: ${{ matrix.leg.job_timeout }}
     permissions:
       contents: read
     strategy:
@@ -123,18 +125,11 @@ jobs:
         if: steps.clone.outcome == 'success'
         run: bash "$RUNNER_TEMP/pci/ctl/supervise.sh" build
 
-      - name: المحاكي (المخرجات إلى ملف)
+      # أ2: لا إجراءَ محاكٍ بحساب العدّاء — المحاكي وخادمُ ADB يُقلعهما المشرفُ **بمستخدم البناء** (طور emu_up) بمنفذٍ خاصّ،
+      #     وصورةُ النظام ثبّتها أمرٌ ثابتٌ (sysimg) قبل أيّ سطرٍ غيرِ موثوق؛ ولا adb بحسابٍ آخر قبل الأطوار ولا بعدها (فحصٌ 18).
+      - name: المحاكي بمستخدم البناء (المخرجات إلى ملف)
         if: steps.clone.outcome == 'success' && matrix.leg.has_emu
-        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
-        with:
-          api-level: ${{ matrix.leg.emu.api }}
-          target: ${{ matrix.leg.emu.target }}
-          arch: ${{ matrix.leg.emu.arch }}
-          profile: ${{ matrix.leg.emu.profile }}
-          ram-size: ${{ matrix.leg.emu.ram }}
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          disable-animations: true
-          script: bash "$RUNNER_TEMP/pci/ctl/supervise.sh" emu
+        run: bash "$RUNNER_TEMP/pci/ctl/supervise.sh" emu
 
       # 🧪 التجربةُ الذاتيّة وحدها (plan يفرض false لغير dry-run): سطرٌ مزروعٌ في السجلّ العلنيّ ⇒ يجب أن تسقط الحالة.
       - name: زرع سطر للتجربة

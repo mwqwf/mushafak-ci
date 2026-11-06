@@ -19,6 +19,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 MAIN_REF = "refs/heads/main"
 PAYLOAD_KEYS = {"sha", "kind", "runner_sha"}
+# أ4: مهلةُ وظيفة build في السير = ميزانيةُ الشوط (timeout في kinds.json، يحسبها المشرفُ من بدئه وتشمل finalize)
+#     + هامشٌ لما قبل المشرف (checkout · setup-java) — فيسبق finalize دائماً إيقافَ GitHub. (لا حسابَ في تعابير YAML.)
+JOB_MARGIN = 6
 
 
 class PlanError(ValueError):
@@ -38,7 +41,8 @@ def load_kinds(path=None):
 def legs_for(spec):
     legs = []
     for leg in spec["legs"]:
-        legs.append({"id": leg["id"], "timeout": int(leg.get("timeout", 60)), "lint": bool(leg.get("lint", False)),
+        legs.append({"id": leg["id"], "timeout": int(leg.get("timeout", 60)),
+                     "job_timeout": int(leg.get("timeout", 60)) + JOB_MARGIN, "lint": bool(leg.get("lint", False)),
                      "has_emu": "emu" in leg,
                      "emu": leg.get("emu", {"api": 0, "target": "", "arch": "", "profile": "", "ram": ""})})
     return legs

@@ -4,7 +4,8 @@
 (حيث ssh-agent) · التشفيرُ ذهاباً وإياباً بـage · ورفضُ المفتاح الوهميّ لمصدرٍ خاصّ وقبولُ مفتاحٍ حقيقيّ ·
 والمشرفُ supervise.sh في الوضع المحلّيّ: prepare ← clone ← أطوار ← finalize ⇒ ready=true ومجلّدٌ بالملفّين بالضبط ·
 رمزُ كلّ طورٍ من خروجه الفعليّ · بيئةٌ مسموحةٌ لا غير · بترُ السجلّ عند الحدّ · ولا حرفَ من السجلّ إلى stdout العلنيّ ·
-ويُتجاهل وضعُ الاختبار داخل Actions."""
+ويُرفض وضعُ الاختبار داخل Actions (أ2-٤) · ومدخلُ التحكّم لا يُستبدل (أ1) · وبقاءُ عمليّةٍ للبناء يمنع قراءةَ شجرته (أ3) ·
+والمهلةُ تقتل جلسةَ الطور كلَّها ولا يُنتظر EOF من عمليّةٍ خلفيّة وسقفُ العمليّات مفروض (أ4) · ومسبارُ المقابس (أ2)."""
 import base64
 import gzip
 import json
@@ -25,6 +26,7 @@ import artifact_check as ac  # noqa: E402
 import counts_schema as cs  # noqa: E402
 
 SCRIPTS = ("clone.sh", "build.sh", "encrypt_log.sh", "supervise.sh")
+import iso_probe  # noqa: E402
 REF_OK = "mwqwf/mushafak-ci/.github/workflows/private-ci.yml@refs/heads/main"
 SHA = "0" * 40
 
@@ -269,11 +271,15 @@ class PubkeyFileTest(unittest.TestCase):
 
 
 PUBLIC_LINE = re.compile(
-    r"^(العزل: .*|الاستنساخ: [✅⛔].*|الأطوار \((build|emu)\): \d+ · فاشلة \d+|الناتج: .*|المشرف: ⛔ .*)$")
+    r"^(العزل: .*|الاستنساخ: [✅⛔].*|الأطوار \((build|emu)\): \d+ · فاشلة \d+|الأطوار: ⛔ .*|التنظيف: ⛔ .*|الناتج: .*"
+    r"|المشرف: ⛔ .*)$")
 ALLOWED_BUILDER_ENV = {
     "HOME", "PATH", "JAVA_HOME", "ANDROID_HOME", "ANDROID_SDK_ROOT", "ANDROID_USER_HOME", "GRADLE_USER_HOME", "GRADLE_OPTS",
     "CI", "TERM", "LANG", "PYTHONIOENCODING", "GITHUB_WORKFLOW_REF", "PCI_KIND", "PCI_LEG", "PCI_LINT", "PCI_SRC",
-    "PCI_BSTATE", "PCI_BDEVICE", "PCI_WHISPER_REF",
+    "PCI_BSTATE", "PCI_BDEVICE", "PCI_WHISPER_REF", "PCI_RUN_TAG",
+    # أ2: خادمُ ADB والمحاكي بمستخدم البناء بمنفذٍ ومجلّداتٍ خاصّة، ومعاملاتُ المحاكي بأنماطٍ مغلقة
+    "ANDROID_ADB_SERVER_PORT", "ADB_SERVER_SOCKET", "ANDROID_AVD_HOME", "ANDROID_EMULATOR_HOME",
+    "PCI_EMU_API", "PCI_EMU_TARGET", "PCI_EMU_ARCH", "PCI_EMU_PROFILE", "PCI_EMU_RAM",
     # يضبطها build.sh نفسُه (مصارفُ مهملةٌ داخل مجلّد البناء) وبيئةُ bash الذاتيّة
     "GITHUB_STEP_SUMMARY", "GITHUB_ENV", "GITHUB_OUTPUT", "GITHUB_PATH", "GITHUB_STATE", "PWD", "OLDPWD", "SHLVL", "_",
 }
@@ -331,7 +337,7 @@ class SupervisorTest(unittest.TestCase):
              "PCI_TEST_NO_ISOLATION": "1", "PCI_TEST_KINDS_FILE": self.kinds_file,
              "PCI_TEST_AGE_BIN": shutil.which("age"), "PCI_TEST_PUBKEY_FILE": self.pubf}
         e.update(kw)
-        return e
+        return {k: v for k, v in e.items() if v is not None}   # None ⇒ يُحذف المتغيّرُ أصلاً
 
     def sup(self, mode, **kw):
         """يشغّل مشرفَ ctl (النسخةَ الموثوقة) إن وُجد، وإلا النسخةَ الأصليّة (لـprepare)."""
@@ -518,12 +524,23 @@ class SupervisorTest(unittest.TestCase):
         self.assertNotIn("← selftest_ok", self.log())
         self.assertIn("لا وقتَ كافياً", self.log())
 
-    def test_deadline_is_leg_timeout_minus_six_minutes(self):
+    def test_budget_starts_with_the_supervisor_and_phases_stop_five_minutes_before(self):
+        """أ4: الميزانيةُ (مهلةُ الشوط) تُحسب من بدء المشرف وتشمل كلَّ شيء؛ والأطوارُ تنتهي قبلها بخمس دقائق لـfinalize؛
+        ووظيفةُ build في السير مهلتُها الميزانيةُ + هامش (job_timeout) فيسبق finalize إيقافَ GitHub."""
         self.write_kinds(tiny_kinds(["selftest_ok"], timeout=75))
         before = int(time.time())
         self.sup("prepare")
         dl = int(readf(os.path.join(self.pci, "state", "deadline")))
-        self.assertTrue(before + 69 * 60 - 5 <= dl <= int(time.time()) + 69 * 60 + 5, dl - before)
+        be = int(readf(os.path.join(self.pci, "state", "budget_end")))
+        self.assertTrue(before + 70 * 60 - 5 <= dl <= int(time.time()) + 70 * 60 + 5, dl - before)
+        self.assertEqual(be - dl, 300)
+        wf = readf(os.path.join(HERE, "..", "..", ".github", "workflows", "private-ci.yml"))
+        self.assertIn("timeout-minutes: ${{ matrix.leg.job_timeout }}", wf)
+        import plan
+        for spec in plan.load_kinds().values():
+            for leg in plan.legs_for(spec):
+                self.assertEqual(leg["job_timeout"], leg["timeout"] + plan.JOB_MARGIN)
+        self.assertGreaterEqual(plan.JOB_MARGIN, 5)
 
     def test_unrun_emulator_phases_are_recorded_as_failed_not_lost(self):
         self.write_kinds(tiny_kinds(["selftest_ok", "selftest_fail"], emu_flags={"selftest_fail": True}))
@@ -573,8 +590,33 @@ class SupervisorTest(unittest.TestCase):
         self.assertIn("داخل GitHub Actions", r.stdout)
         self.assertFalse(os.path.exists(self.pci), "أنشأ مجلّداً قبل الرفض")
 
-    def test_no_isolation_flag_is_ignored_inside_actions(self):
-        """داخل Actions يُتجاهل PCI_TEST_NO_ISOLATION: يجري العزلُ الحقيقيّ (sudo مزيَّفٌ هنا يفشل) ولا يُنشأ بيتُ البناء المحلّيّ."""
+    def test_no_isolation_flag_is_refused_inside_actions_before_anything(self):
+        """أ2-٤: وجودُ PCI_TEST_NO_ISOLATION (ولو فارغاً) داخل Actions يُفشل الشوطَ قبل أيّ شيء — لا مجلّدَ ولا مستخدم."""
+        for val in ("1", "", "0"):
+            with self.subTest(val=val):
+                for mode in ("prepare", "clone", "build", "emu", "finalize"):
+                    r = subprocess.run(["bash", os.path.join(HERE, "supervise.sh"), mode],
+                                       env=self.env(GITHUB_ACTIONS="true", PCI_TEST_NO_ISOLATION=val),
+                                       capture_output=True, text=True, timeout=30)
+                    self.assertEqual(r.returncode, 2, (mode, r.stdout))
+                    self.assertIn("مرفوضٌ داخل GitHub Actions", r.stdout)
+                self.assertFalse(os.path.exists(self.pci), "أنشأ مجلّداً قبل الرفض")
+
+    def test_any_test_variable_is_refused_on_a_real_runner(self):
+        """على عدّاءٍ حقيقيّ (RUNNER_ENVIRONMENT مضبوطٌ دائماً) لا يُقبل أيُّ متغيّرٍ PCI_TEST_* — ولو لم يكن وضعَ العزل."""
+        env = {k: v for k, v in self.env(GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted").items()
+               if not k.startswith("PCI_TEST_")}
+        for hook in ("PCI_TEST_BIN_DIR", "PCI_TEST_KINDS_FILE", "PCI_TEST_PHASE_CAP", "PCI_TEST_CLEANUP_SKIP_KILL",
+                     "PCI_TEST_PHASE_SECS", "PCI_TEST_REMOTE", "PCI_TEST_AGE_BIN"):
+            with self.subTest(hook=hook):
+                r = subprocess.run(["bash", os.path.join(HERE, "supervise.sh"), "prepare"], env=dict(env, **{hook: "x"}),
+                                   capture_output=True, text=True, timeout=30)
+                self.assertEqual(r.returncode, 2, r.stdout)
+                self.assertIn("PCI_TEST_* مرفوضةٌ", r.stdout)
+                self.assertFalse(os.path.exists(self.pci))
+
+    def test_real_isolation_runs_inside_actions_without_test_flag(self):
+        """داخل Actions بلا PCI_TEST_NO_ISOLATION يجري العزلُ الحقيقيّ (sudo مزيَّفٌ هنا يفشل) ولا يُنشأ بيتُ البناء المحلّيّ."""
         fake = os.path.join(self.d, "fakebin"); os.makedirs(fake)
         calls = os.path.join(self.d, "sudo_calls")
         with open(os.path.join(fake, "sudo"), "w") as f:
@@ -583,7 +625,7 @@ class SupervisorTest(unittest.TestCase):
         # ⛔ يمنع المشرفُ كلَّ sudo حقيقيٍّ هنا: مسارُه ثابتٌ، والمزيَّفُ يدخل بـPCI_TEST_BIN_DIR (مرفوضٌ على عدّاءٍ حقيقيّ)
         self.assertEqual(subprocess.run(["bash", "-c", 'PATH="%s:$PATH"; command -v sudo' % fake], capture_output=True,
                                         text=True).stdout.strip(), os.path.join(fake, "sudo"))
-        kw = dict(GITHUB_ACTIONS="true", PCI_TEST_BIN_DIR=fake)
+        kw = dict(GITHUB_ACTIONS="true", PCI_TEST_BIN_DIR=fake, PCI_TEST_NO_ISOLATION=None)
         r = self.sup("prepare", **kw)
         self.assertEqual(subprocess.run(["getent", "passwd", "pcibuild"], capture_output=True).returncode, 2,
                          "أُنشئ مستخدمٌ حقيقيّ! (sudo غيرُ مزيَّف)")
@@ -604,9 +646,10 @@ class SupervisorTest(unittest.TestCase):
         # PCI_TEST_KINDS_FILE وPCI_TEST_PHASE_CAP لا يُقرآن إلا داخل if LOCAL
         local_block = code[code.index('if [ "$LOCAL" = 1 ]; then\n  [ -n "${PCI_TEST_KINDS_FILE'):]
         local_block = local_block[:local_block.index("fi\n")]
-        for hook in ("PCI_TEST_KINDS_FILE", "PCI_TEST_PHASE_CAP"):
+        for hook in ("PCI_TEST_KINDS_FILE", "PCI_TEST_PHASE_CAP", "PCI_TEST_CLEANUP_SKIP_KILL", "PCI_TEST_PHASE_SECS"):
             self.assertEqual(code.count(hook), local_block.count(hook), hook)
-        self.assertEqual(code.count("PCI_TEST_NO_ISOLATION"), 1)
+            self.assertGreater(local_block.count(hook), 0, hook)
+        self.assertEqual(code.count("PCI_TEST_NO_ISOLATION"), 3)   # بوّابةُ الرفض داخل Actions (شرطٌ ورسالة) ثمّ شرطُ الوضع المحلّيّ
         self.assertIn('"${GITHUB_ACTIONS:-}" != "true"', code)
 
     def test_supervisor_path_is_fixed_and_job_path_dirs_are_hardened(self):
@@ -649,8 +692,8 @@ class SupervisorTest(unittest.TestCase):
         self.assertIn("os.access(p, os.W_OK)", iso)
         self.assertIn("else 3)", iso)
         self.assertIn("[ $? -ne 3 ]", iso)                                        # 127 (لا python3) يُحسب عزلاً مفقوداً لا نجاحاً
-        self.assertEqual(sum(1 for ln in iso.splitlines() if ln.strip().startswith("must_fail ")), 8)
-        self.assertEqual(sum(1 for ln in iso.splitlines() if ln.strip().startswith("must_pass ")), 3)
+        self.assertEqual(sum(1 for ln in iso.splitlines() if ln.strip().startswith("must_fail ")), 12)
+        self.assertEqual(sum(1 for ln in iso.splitlines() if ln.strip().startswith("must_pass ")), 5)
         wf = readf(os.path.join(HERE, "..", "..", ".github", "workflows", "private-ci.yml"))
         self.assertIn('run: python3 -I -S "$RUNNER_TEMP/pci/ctl/guard.py" --emit-plant', wf)
 
@@ -687,12 +730,243 @@ class SupervisorTest(unittest.TestCase):
         ctl = os.path.join(self.pci, "ctl")
         self.assertEqual(stat.S_IMODE(os.stat(ctl).st_mode), 0o700)
         for name in ("supervise.sh", "build.sh", "clone.sh", "encrypt_log.sh", "counts_schema.py", "artifact_check.py",
-                     "guard.py", "kinds.json", "log_pubkey.txt"):
+                     "guard.py", "kinds.json", "log_pubkey.txt", "iso_probe.py"):
             p = os.path.join(ctl, name)
             self.assertTrue(os.path.isfile(p), name)
             self.assertEqual(stat.S_IMODE(os.stat(p).st_mode) & 0o077, 0, name)
         # نسخةُ البناء من build.sh (يقرؤها البناءُ ولا يعدّلها في الإنتاج)
         self.assertTrue(os.path.isfile(os.path.join(self.rt, "builder", "ctl", "build.sh")))
+
+
+    # ───── الإصلاح الرابع (مراجعة Codex 13-ج) ─────
+    def tagged(self):
+        tag = readf(os.path.join(self.pci, "state", "run_tag")).strip()
+        out = []
+        for pid in filter(str.isdigit, os.listdir("/proc")):
+            try:
+                if ("PCI_RUN_TAG=" + tag).encode() in readf(f"/proc/{pid}/environ", "rb"):
+                    out.append(int(pid))
+            except OSError:
+                pass
+        return out
+
+    def kill_tagged(self):
+        for pid in self.tagged():
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+    def test_a1_tampered_control_entry_is_detected_and_halts_later_phases(self):
+        """أ1: طورٌ يبدّل مدخلَ التحكّم ⇒ لا يُستدعى بعده طور (126) ويُعلن ذلك علناً؛ فلا يُسجَّل نجاحُ طورٍ لم يُنفَّذ غلافُه الأصليّ."""
+        self.write_kinds(tiny_kinds(["selftest_tamper", "selftest_ok", "selftest_env"]))
+        rs = self.run_all()
+        self.assertEqual((self.rc("selftest_tamper"), self.rc("selftest_ok"), self.rc("selftest_env")), ("0", "126", "126"))
+        self.assertNotIn("← selftest_env\nHOME=", self.log())
+        self.assertIn("الأطوار: ⛔ مدخلُ التحكّم تغيّر", "\n".join(r.stdout for r in rs))
+        c = self.counts()
+        self.assertEqual(sorted(c["failed_phase_ids"]), ["selftest_env", "selftest_ok"])
+        self.assertFalse(c["ok"])
+
+    def test_a1_control_entry_lives_in_a_root_owned_tree_and_its_chain_is_checked(self):
+        """أ1: في الإنتاج المدخلُ في /var/lib/pci-ctl (install -d root 0755) لا في بيت pcibuild؛ والسلسلةُ تُفحص من الجذر وقبل كلّ طور؛
+        وأربعةُ فحوصٍ سلبيّة بصفة pcibuild: إعادةُ تسمية · بديلٌ في مكانه · إعادةُ تسمية الشجرة · كتابة."""
+        body = readf(os.path.join(HERE, "supervise.sh"))
+        code = "\n".join(ln for ln in body.splitlines() if not ln.lstrip().startswith("#"))
+        self.assertIn('CTL_DIR="/var/lib/pci-ctl"', code)
+        self.assertNotIn("/home/pcibuild/ctl", code)
+        self.assertIn('sudo -n install -d -o root -g root -m 0755 "$CTL_DIR"', code)
+        self.assertIn('root_chain_ok "$CTL_DIR/build.sh" && root_chain_ok "$CTL_DIR/iso_probe.py" || return "$(setup_fail ctl-chain)"', code)
+        iso = code[code.index("isolation_tests(){"):code.index("foreign_emu_procs(){")]
+        for probe in ('mv -f "$1/build.sh"', 'ln -s /bin/true "$1/.pci_probe"', 'mv -f "$1" "$1.pci_probe"', 'printf x >> "$1/build.sh"'):
+            self.assertIn(probe, iso)
+            self.assertTrue(any(ln.strip().startswith("must_fail ") and probe in ln for ln in iso.splitlines()), probe)
+        rbp = code[code.index("run_builder_phase(){"):code.index("run_phases(){")]
+        self.assertLess(rbp.index("ctl_intact"), rbp.index("setsid sudo"))
+        self.assertIn('/bin/bash "$CTL_DIR/build.sh" phase "$id"', rbp)
+        # عددُ الفحوص الكلّيّ: 12 سالباً + 5 لازماً + 4 فحوصٍ يحسبها المشرفُ بنفسه (8 · 13 · 18 · 20) = 21
+        manual = iso.count("ISO_N=$((ISO_N + 1))") - 2          # must_fail وmust_pass نفساهما
+        self.assertEqual(manual, 4)
+
+    @unittest.skipUnless(hasattr(os, "geteuid") and os.geteuid() == 0, "يحتاج root لتغيير المالك")
+    def test_a1_root_chain_ok_rejects_non_root_owner_group_write_and_symlink(self):
+        body = readf(os.path.join(HERE, "supervise.sh"))
+        fn = body[body.index("root_chain_ok(){"):body.index("# قبل كلّ طور")]
+        # أبٌ نظاميٌّ لـroot بلا كتابةٍ لغيره (كما /var/lib في صورة العدّاء)؛ و/tmp بـ1777 يُرفض عمداً
+        parent = next((p for p in ("/var/lib", "/root", "/opt") if os.path.isdir(p) and os.stat(p).st_uid == 0
+                       and not os.stat(p).st_mode & 0o022), None)
+        if parent is None:
+            self.skipTest("لا مجلّدَ نظاميٌّ لـroot بلا كتابة")
+        base = tempfile.mkdtemp(prefix="pci-chain-test-", dir=parent)
+        self.addCleanup(shutil.rmtree, base, True)
+        os.chmod(base, 0o755)
+        d = os.path.join(base, "ctl"); os.makedirs(d); os.chmod(d, 0o755)
+        f = os.path.join(d, "build.sh"); open(f, "w").close(); os.chmod(f, 0o644)
+
+        def ok(path):
+            return subprocess.run(["bash", "-c", fn + '\nroot_chain_ok "$1"', "_", path]).returncode == 0
+        if not ok(f):
+            self.skipTest("آباءُ المجلّد المؤقّت ليست لـroot بلا كتابة (بيئةُ الاختبار)")
+        os.chmod(d, 0o775); self.assertFalse(ok(f)); os.chmod(d, 0o755)            # كتابةٌ للمجموعة
+        os.chmod(f, 0o646); self.assertFalse(ok(f)); os.chmod(f, 0o644)            # كتابةٌ للغير
+        os.chown(d, 65534, -1); self.assertFalse(ok(f)); os.chown(d, 0, -1)        # أبٌ لغير root
+        os.chown(f, 65534, -1); self.assertFalse(ok(f)); os.chown(f, 0, -1)
+        link = os.path.join(base, "lnk"); os.symlink(d, link)
+        self.assertFalse(ok(os.path.join(link, "build.sh")))                        # رابطٌ في الآباء
+        self.assertFalse(ok("relative/build.sh"))
+        self.assertFalse(ok(os.path.join(d, "..", "ctl", "build.sh")))
+        self.assertTrue(ok(f))
+
+    def test_a3_escaped_background_process_is_killed_by_cleanup(self):
+        """أ3: عمليّةٌ تهرب من جلسة الطور (setsid) يقتلها التنظيفُ بالحساب لا بالجلسة، ويُتحقَّق من زوالها ⇒ ready=true."""
+        self.write_kinds(tiny_kinds(["selftest_linger", "selftest_ok"]))
+        self.addCleanup(self.kill_tagged)
+        self.run_all(("prepare", "clone", "build"))
+        self.assertTrue(self.tagged(), "لم تبقَ العمليّةُ الهاربة بعد الطور (الاختبارُ لا يختبر شيئاً)")
+        r = self.sup("finalize")
+        self.assertEqual(self.rc("cleanup"), "0")
+        self.assertEqual(self.tagged(), [])
+        self.assertEqual(self.ready(), "ready=true", r.stdout)
+
+    def test_a3_surviving_builder_process_blocks_reading_the_tree(self):
+        """أ3: بقاءُ عمليّةٍ للبناء بعد التنظيف ⇒ cleanup فاشل · ready=false · لا JUnit يُقرأ · وسطرٌ علنيٌّ بالعدد وحده."""
+        self.write_kinds(tiny_kinds(["selftest_linger"], kind="app-test"))
+        self.addCleanup(self.kill_tagged)
+        self.run_all(("prepare", "clone"), PCI_KIND="app-test")
+        base = os.path.join(self.rt, "builder", "src", "app", "build", "test-results", "t")
+        os.makedirs(base)
+        with open(os.path.join(base, "a.xml"), "w") as f:
+            f.write('<testsuite tests="4" failures="0" errors="0" skipped="0"/>')
+        self.sup("build", PCI_KIND="app-test")
+        r = self.sup("finalize", PCI_KIND="app-test", PCI_TEST_CLEANUP_SKIP_KILL="1")
+        self.assertEqual(self.rc("cleanup"), "1")
+        self.assertEqual(self.ready(), "ready=false")
+        self.assertIn("التنظيف: ⛔ بقيت 1 عمليّةً لمستخدم البناء — لا تُقرأ شجرتُه", r.stdout)
+        self.assertIn("الناتج: ⛔", r.stdout)
+        with open(os.path.join(self.pci, "art", "counts.json"), "rb") as f:
+            c = json.loads(f.read())
+        self.assertEqual((c["tests"], c["reports"], c["ok"]), (0, 0, False))
+        self.assertIn("cleanup", c["failed_phase_ids"])
+        self.assertFalse(os.path.exists(os.path.join(self.pci, "art", "log.txt.gz.age")), "شُفِّر ناتجٌ غيرُ جاهز")
+
+    def test_a4_phase_timeout_kills_its_whole_session(self):
+        """أ4: انقضاءُ مهلة الطور يقتل جلستَه كلَّها (لا ينجو ابنٌ) ويسجّل 124، ويجري الطورُ التالي."""
+        self.write_kinds(tiny_kinds(["selftest_sleep", "selftest_ok"]))
+        self.addCleanup(self.kill_tagged)
+        self.run_all(("prepare", "clone"))
+        t0 = time.time()
+        self.sup("build", PCI_TEST_PHASE_SECS="2")
+        self.assertLess(time.time() - t0, 40)
+        self.assertEqual((self.rc("selftest_sleep"), self.rc("selftest_ok")), ("124", "0"))
+        self.assertIn("انقضت مهلةُ طور selftest_sleep", self.log())
+        self.assertEqual(self.tagged(), [])
+
+    def test_a4_background_process_holding_output_does_not_block_the_supervisor(self):
+        """أ4: عمليّةٌ خلفيّةٌ تمسك مخرجَ الطور بعد انتهائه لا تعلّق المشرف (لا انتظارَ EOF)؛ والطورُ ناجحٌ برمزه الفعليّ."""
+        self.write_kinds(tiny_kinds(["selftest_hold", "selftest_ok"]))
+        self.addCleanup(self.kill_tagged)
+        self.run_all(("prepare", "clone"))
+        t0 = time.time()
+        r = self.sup("build")
+        self.assertLess(time.time() - t0, 30, "انتظر المشرفُ EOF من عمليّةٍ خلفيّة")
+        self.assertIn("الأطوار (build): 2 · فاشلة 0", r.stdout)
+        self.sup("finalize")
+        self.assertEqual(self.ready(), "ready=true")
+        self.assertEqual(self.tagged(), [])
+
+    def test_public_descriptor_is_never_inherited_by_builder_processes(self):
+        """الواصفةُ 3 (السجلُّ العلنيّ) تُغلق لكلّ عمليّةٍ بمستخدم البناء وللمصرف: لا كتابةَ منها إلى العلن ولا إمساكَ لأنبوب الخطوة."""
+        body = readf(os.path.join(HERE, "supervise.sh"))
+        code = "\n".join(ln for ln in body.splitlines() if not ln.lstrip().startswith("#"))
+        fn = code[code.index("as_builder(){"):code.index("root_chain_ok(){")]
+        self.assertEqual(fn.count("3>&-"), 2)
+        rbp = code[code.index("run_builder_phase(){"):code.index("run_phases(){")]
+        self.assertEqual(rbp.count("3>&-"), 3)
+
+    def test_a4_builder_runs_under_a_process_cap(self):
+        self.write_kinds(tiny_kinds(["selftest_limits"]))
+        self.run_all()
+        log = self.log()
+        seg = log[log.index("← selftest_limits"):]
+        n = int(re.search(r"(?m)^(\d+)$", seg).group(1))
+        self.assertLessEqual(n, 4096)
+        body = readf(os.path.join(HERE, "supervise.sh"))
+        self.assertIn('"${LIMIT[@]}" /bin/bash "$CTL_DIR/build.sh" phase', body)
+        self.assertIn('must_pass bash -c \'l="$(ulimit -u)"', body)
+
+    def test_a2_emulator_and_adb_never_run_as_the_runner(self):
+        """أ2: لا إجراءَ محاكٍ بحساب العدّاء في السير؛ والمشرفُ لا يستدعي adb ولا emulator ولا avdmanager؛ والمحاكي يُقلعه طورُ
+        emu_up بمستخدم البناء بمنفذ خادمٍ خاصّ؛ وفحوصُ 18–20 قبل الاستنساخ وفحصُ 18 ثانيةً في finalize."""
+        wf = readf(os.path.join(HERE, "..", "..", ".github", "workflows", "private-ci.yml"))
+        self.assertNotIn("android-emulator-runner", wf)
+        self.assertIn('run: bash "$RUNNER_TEMP/pci/ctl/supervise.sh" emu', wf)
+        body = readf(os.path.join(HERE, "supervise.sh"))
+        code = "\n".join(ln for ln in body.splitlines() if not ln.lstrip().startswith("#"))
+        self.assertNotRegex(code, r"platform-tools/adb|emulator/emulator|\bavdmanager\b|\badb\s+(start-server|-s|shell|kill)")
+        self.assertIn('"ANDROID_ADB_SERVER_PORT=$ADB_PORT"', code)
+        self.assertNotIn("ADB_PORT=5037", code)
+        iso = code[code.index("isolation_tests(){"):code.index("foreign_emu_procs(){")]
+        self.assertIn('fe="$(foreign_emu_procs)"', iso)
+        self.assertIn('iso_probe.py" deny /var/run/docker.sock', iso)
+        self.assertIn("sock_probe", iso)
+        fin = code[code.index("do_finalize(){"):]
+        self.assertLess(fin.index("foreign_emu_procs"), fin.index("do_cleanup"))
+        build = readf(os.path.join(HERE, "build.sh"))
+        self.assertIn('setsid "$sdk/emulator/emulator"', build)
+        self.assertIn("ANDROID_ADB_SERVER_PORT", build)
+        self.assertEqual(self.sup("prepare").returncode, 0)
+        self.assertEqual(readf(os.path.join(self.pci, "state", "run_tag")).strip().__len__(), 32)
+
+
+class IsoProbeTest(unittest.TestCase):
+    """أ2: مسبارُ المقابس — الجردُ يلتقط مقابسَ الحساب ومجموعاته (لا مجموعات البناء)، والاتّصالُ يُعدّ ولا يطبع اسماً."""
+
+    def test_fs_candidates_by_owner_and_group(self):
+        with tempfile.TemporaryDirectory() as d:
+            mine, other = os.path.join(d, "mine.sock"), os.path.join(d, "sub", "grp.sock")
+            os.makedirs(os.path.dirname(other))
+            socks = []
+            for p in (mine, other):
+                s = __import__("socket").socket(__import__("socket").AF_UNIX)
+                s.bind(p); s.listen(1); socks.append(s)
+            self.addCleanup(lambda: [s.close() for s in socks])
+            open(os.path.join(d, "plain"), "w").close()
+            uid, gid = os.getuid(), os.getgid()
+            got = iso_probe.fs_candidates(uid, set(), set(), roots=(d,))
+            self.assertEqual(sorted(got), sorted([mine, other]))
+            self.assertEqual(iso_probe.fs_candidates(uid + 12345, set(), set(), roots=(d,)), [])
+            self.assertEqual(sorted(iso_probe.fs_candidates(uid + 12345, {gid}, set(), roots=(d,))), sorted([mine, other]))
+            self.assertEqual(iso_probe.fs_candidates(uid + 12345, {gid}, {gid}, roots=(d,)), [])   # مجموعةٌ يملكها البناءُ أيضاً
+
+    def test_connect_counts_without_printing_names_and_deny(self):
+        import socket
+        with tempfile.TemporaryDirectory() as d:
+            live = os.path.join(d, "live.sock")
+            s = socket.socket(socket.AF_UNIX); s.bind(live); s.listen(4)
+            self.addCleanup(s.close)
+            dead = os.path.join(d, "dead.sock")
+            s2 = socket.socket(socket.AF_UNIX); s2.bind(dead); s2.close()      # ملفُّ مقبسٍ بلا مُنصِت
+            data = b"".join(x.encode() + b"\0" for x in (live, dead, os.path.join(d, "none")))
+            r = subprocess.run([sys.executable, "-I", "-S", os.path.join(HERE, "iso_probe.py"), "connect"], input=data,
+                               capture_output=True)
+            self.assertEqual(r.returncode, 1)
+            self.assertEqual(r.stdout.decode().strip(), "3 1")
+            self.assertNotIn(d.encode(), r.stdout + r.stderr)
+            r0 = subprocess.run([sys.executable, "-I", "-S", os.path.join(HERE, "iso_probe.py"), "connect"],
+                                input=os.path.join(d, "none").encode() + b"\0", capture_output=True)
+            self.assertEqual((r0.returncode, r0.stdout.decode().strip()), (0, "1 0"))
+            self.assertEqual(iso_probe.cmd_deny(os.path.join(d, "none")), 0)   # لا مقبس
+            self.assertEqual(iso_probe.cmd_deny(live), 1)                       # قَبِل ⇒ فشل
+            self.assertEqual(iso_probe.cmd_deny(dead), 2)                       # ECONNREFUSED: الصلاحيةُ متاحة ⇒ ليس نجاحاً
+
+    def test_abstract_listening_socket_held_by_the_account_is_found(self):
+        import socket
+        name = "pci-probe-test-%d" % os.getpid()
+        s = socket.socket(socket.AF_UNIX); s.bind("\0" + name); s.listen(1)
+        self.addCleanup(s.close)
+        self.assertIn("@" + name, iso_probe.abstract_candidates(os.getuid()))
+        self.assertNotIn("@" + name, iso_probe.abstract_candidates(os.getuid() + 12345))
+        self.assertEqual(iso_probe.try_connect("@" + name)[0], True)
 
 
 class BuildScriptTest(unittest.TestCase):

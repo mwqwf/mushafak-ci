@@ -323,6 +323,59 @@ class FetchLogsTest(unittest.TestCase):
         self.assertEqual(asked, [pub.MAX_BUILD_LOG + 1])
         self.assertEqual(pub.MAX_BUILD_LOG, 32 * 1024 * 1024)
 
+    def chain(self, locs, final=b"Run bash x\n"):
+        """سلسلةُ تحويلات: api ← locs[0] ← locs[1] … ثمّ الجسمُ النهائيّ؛ ويُسجَّل كلُّ طلبٍ بترويسة اعتماده."""
+        seen = []
+
+        def api(req, timeout=0):
+            seen.append(("api", req.full_url, req.headers.get("Authorization")))
+            if req.full_url.endswith("/jobs?per_page=100"):
+                return self.jobs_resp(1)
+            raise urllib.error.HTTPError(req.full_url, 302, "Found", {"Location": locs[0]}, None)
+
+        def plain(req, timeout=0):
+            seen.append(("plain", req.full_url, req.get_header("Authorization")))
+            i = locs.index(req.full_url)
+            if i + 1 < len(locs):
+                raise urllib.error.HTTPError(req.full_url, 307, "Temp", {"Location": locs[i + 1]}, None)
+            return Resp(final)
+        return (lambda: pub.fetch_build_logs("mwqwf/mushafak-ci", "5", "1", "tok", 1, api, plain)), seen
+
+    def test_a9_every_hop_is_checked_and_capped_at_three(self):
+        """أ9: كلُّ قفزةٍ يُفحص مضيفُها قبل الطلب، ولا Authorization بعد الطلب الأوّل، ولا أكثرَ من ثلاث قفزات."""
+        two = [self.BLOB, "https://pipelines.actions.githubusercontent.com/x/log"]
+        run, seen = self.chain(two)
+        self.assertEqual(len(run()), 1)
+        self.assertEqual([s[1] for s in seen if s[0] == "plain"], two)
+        self.assertTrue(all(s[2] is None for s in seen if s[0] == "plain"))
+        # قفزةٌ ثانيةٌ إلى مضيفٍ ممنوع ⇒ تُرفض قبل أن تُطلب
+        run, seen = self.chain([self.BLOB, "https://evil.example/log"])
+        with self.assertRaises(RuntimeError) as cm:
+            run()
+        self.assertEqual(str(cm.exception), "logs-host")
+        self.assertEqual([s[1] for s in seen if s[0] == "plain"], [self.BLOB])
+        # ثلاثُ قفزاتٍ مقبولة؛ والرابعةُ ⇒ logs-hops (ولا تُطلب)
+        three = [self.BLOB + "&a=1", self.BLOB + "&a=2", self.BLOB + "&a=3"]
+        run, _ = self.chain(three)
+        self.assertEqual(len(run()), 1)
+        run, seen = self.chain(three + [self.BLOB + "&a=4"])
+        with self.assertRaises(RuntimeError) as cm:
+            run()
+        self.assertEqual(str(cm.exception), "logs-hops")
+        self.assertNotIn(self.BLOB + "&a=4", [s[1] for s in seen])
+        # تحويلٌ نسبيٌّ لا يُحلّ ولا يُتبع
+        run, seen = self.chain(["/repos/x/logs2"])
+        with self.assertRaises(RuntimeError) as cm:
+            run()
+        self.assertEqual(str(cm.exception), "logs-host")
+
+    def test_a9_default_openers_never_follow_redirects(self):
+        import urllib.request
+        api_open, plain_open = pub.default_openers()
+        for op in (api_open, plain_open):
+            self.assertIsNot(op, urllib.request.urlopen)
+            self.assertTrue(any(isinstance(h, pub._NoRedirect) for h in op.__self__.handlers))
+
     def test_non_redirect_http_error(self):
         def api(req, timeout=0):
             if req.full_url.endswith("/jobs?per_page=100"):
