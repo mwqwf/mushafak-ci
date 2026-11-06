@@ -610,18 +610,49 @@ class SupervisorTest(unittest.TestCase):
         self.assertIn('"${GITHUB_ACTIONS:-}" != "true"', code)
 
     def test_supervisor_path_is_fixed_and_job_path_dirs_are_hardened(self):
-        """مجلّداتُ PATH القابلةُ للكتابة لـpcibuild تُحصَّن ثمّ تُختبر (وإلا `bash`/`sudo` مزيَّفٌ يُنفَّذ بصلاحية runner)."""
+        """مجلّداتُ PATH القابلةُ للكتابة لـpcibuild — في PATH الوظيفة وفي مسار المشرف الثابت، وبلا استثناءٍ للنظاميّ — تُحصَّن ثمّ تُختبر
+        (وإلا `bash`/`sudo`/`python3` مزيَّفٌ يُنفَّذ بصلاحية runner). وقعت فعلاً: /usr/local/bin مفتوحٌ للكتابة في صورة العدّاء وكان مستثنى
+        من التحصين فسقط الفحصُ 8 (التجربة الجافّة 42250728242 — المواضع 10 و18)."""
         body = readf(os.path.join(HERE, "supervise.sh"))
         code = "\n".join(ln for ln in body.splitlines() if not ln.lstrip().startswith("#"))
         self.assertIn('export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"', code)
-        self.assertIn("harden_path_dirs", code)
         self.assertIn('JOB_PATH="$PATH"', code)
         self.assertLess(code.index('JOB_PATH="$PATH"'), code.index('export PATH="/usr/local/sbin'))
+        fn = code[code.index("harden_path_dirs(){"):code.index("isolation_tests(){")]
+        self.assertIn("for d in $JOB_PATH:$PATH; do", fn)                      # مسارُ المشرف أيضاً — كما يختبره الفحصُ 8 سواءً بسواء
+        self.assertNotIn("continue ;;", fn)                                       # لا قائمةَ استثناءٍ تُخرج مجلّداً من التحصين
+        self.assertNotRegex(fn, r"/usr/local/bin[^\n]*continue")
+        sys_line = next(ln for ln in fn.splitlines() if "|/usr/local/bin|" in ln)
+        self.assertIn("chmod -R o-w", sys_line)                                   # النظاميُّ يُجرَّد من كتابة الغير…
+        self.assertNotIn("chown", sys_line)                                       # …ويبقى لـroot
+        self.assertIn('pub "التهيئة: ⛔ path-harden $pos"', fn)                    # الفشلُ يُعلَن بالموضع لا بالاسم
+        self.assertIn('pub "التهيئة: ⛔ path-still-writable $pos"', fn)            # ويُعاد الفحصُ بعد التحصين
+        self.assertLess(fn.index("esac"), fn.index("path-still-writable"))
+        self.assertNotRegex(fn, r'pub "[^"]*\$(rd|d|me)\b')                       # لا مسارَ ولا اسمَ مستخدمٍ علناً
         # الحمايةُ تسبق الفحص: تحصينٌ ثمّ اختبار
         self.assertLess(code.index("harden_path_dirs ||"), code.index("isolation_tests\n"))
         # وفي الوضع المحلّيّ لا يغيّر المشرفُ PATH الاختباريّ الذي يحتاج git وage (يبقيهما في المسار الثابت)
         r = self.sup("prepare")
         self.assertEqual(r.returncode, 0)
+
+    def test_supervisor_python_is_isolated_and_its_module_path_is_tested(self):
+        """المشرفُ يشغّل python3 بعد البناء غيرِ الموثوق على الآلة نفسها ⇒ كلُّ استدعاءٍ بـ`-I -S` (لا PYTHONPATH ولا site ولا .pth
+        ولا sitecustomize)، والفحصُ 12 من فحوص العزل يُثبت أنّ pcibuild لا يكتب في مسار وحداته — وبصرامة: غيابُ python3 عنه فشلٌ لا نجاح.
+        وسطرُ الزرع في سير العمل (يجري بعد البناء أيضاً) بالأعلام نفسِها."""
+        body = readf(os.path.join(HERE, "supervise.sh"))
+        code = "\n".join(ln for ln in body.splitlines() if not ln.lstrip().startswith("#"))
+        calls = [ln for ln in code.splitlines() if re.search(r"(^|[\s(;{'])python3\s", ln)]   # ومنها استدعاءُ الفحص 12 داخل الاقتباس
+        self.assertGreaterEqual(len(calls), 4)
+        for ln in calls:
+            self.assertIn("python3 -I -S ", ln, ln)
+        iso = code[code.index("isolation_tests(){"):code.index("do_prepare(){")]
+        self.assertIn("os.access(p, os.W_OK)", iso)
+        self.assertIn("else 3)", iso)
+        self.assertIn("[ $? -ne 3 ]", iso)                                        # 127 (لا python3) يُحسب عزلاً مفقوداً لا نجاحاً
+        self.assertEqual(sum(1 for ln in iso.splitlines() if ln.strip().startswith("must_fail ")), 8)
+        self.assertEqual(sum(1 for ln in iso.splitlines() if ln.strip().startswith("must_pass ")), 3)
+        wf = readf(os.path.join(HERE, "..", "..", ".github", "workflows", "private-ci.yml"))
+        self.assertIn('run: python3 -I -S "$RUNNER_TEMP/pci/ctl/guard.py" --emit-plant', wf)
 
     def test_sudo_restriction_is_one_sudo_call_and_setup_steps_are_public(self):
         """chown يمسح بِتَّ setuid من ثنائيّ sudo (لينكس يعامل root كغيره) ⇒ chown وchmod 4750 في استدعاء sudo واحد، وإلا عجز

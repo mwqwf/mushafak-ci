@@ -139,7 +139,7 @@ jobs:
       # 🧪 التجربةُ الذاتيّة وحدها (plan يفرض false لغير dry-run): سطرٌ مزروعٌ في السجلّ العلنيّ ⇒ يجب أن تسقط الحالة.
       - name: زرع سطر للتجربة
         if: needs.plan.outputs.plant == 'true'
-        run: python3 "$RUNNER_TEMP/pci/ctl/guard.py" --emit-plant
+        run: python3 -I -S "$RUNNER_TEMP/pci/ctl/guard.py" --emit-plant
 
       # D13: يقتل عمليّاتِ pcibuild ← يعدّ ← يشفّر ← يفحص ⇒ ready=true|false (المشرفُ وحده يكتب مجلّدَ الناتج).
       - name: العدّ والتشفير والفحص

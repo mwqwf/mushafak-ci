@@ -390,7 +390,7 @@ class ScopeNegativeTest(unittest.TestCase):
             "fin-not-always": good.replace("        id: fin\n        if: always()\n", "        id: fin\n", 1),
             "fin-wrong-run": good.replace(SUP + " finalize", SUP + " emu", 1),
             "workspace-tools-after-prep": good.replace(BLD, "        run: bash ctl/jobs/private_ci/supervise.sh build\n", 1),
-            "plant-from-workspace": good.replace('python3 "$RUNNER_TEMP/pci/ctl/guard.py" --emit-plant', "python3 ctl/jobs/private_ci/guard.py --emit-plant", 1),
+            "plant-from-workspace": good.replace('python3 -I -S "$RUNNER_TEMP/pci/ctl/guard.py" --emit-plant', "python3 -I -S ctl/jobs/private_ci/guard.py --emit-plant", 1),
             "supervisor-from-workspace-clone": good.replace(SUP + " clone", "bash ctl/jobs/private_ci/supervise.sh clone", 1),
             "exec-before-prep": good.replace("      - name: تهيئة العزل واختباره\n", "      - run: echo hi\n      - name: تهيئة العزل واختباره\n", 1),
             "prep-after-clone": good.replace("        id: prep\n", "        id: prepx\n", 1),
