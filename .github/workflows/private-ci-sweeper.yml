@@ -1,0 +1,77 @@
+# 🧹 **كنّاسُ سجلّات private-ci** (v3 · D18) — طبقةٌ ثانيةٌ لا أساس.
+#
+# الأساسُ في private-ci.yml نفسِه: لا يخرج من build إلا أرقامٌ وسجلٌّ مشفَّر، ووظيفةُ publish تفحص سجلّاتِ build العلنيّة
+# بالحارس **قبل** الحالة فاشتباهُها يُسقطها. وهذا الكنّاسُ بعد اكتمال التشغيلة: ينزّل سجلَّها العلنيَّ كلَّه كما يراه أيُّ
+# زائر ويمرّره على guard.py؛ فإن وجد شيئاً — أو علّمت publish خطوةَ «طلب حذف السجل» — حذف السجلَّ **وكلَّ Artifacts التشغيلة** بالواجهة.
+# ⛔ وأيُّ تعذّرٍ في حذف السجلّ أو أيّ Artifact ⇒ الكنّاسُ يفشل (تشغيلةٌ حمراءُ ظاهرةٌ تعني «حذفٌ يدويٌّ واجب»).
+# ⛔ حذفُ السجلّ بعديّ: ما طُبع رُئي حيّاً حتى يكتمل الشوط (الخطرُ المتبقّي في README) — فهو تنظيفٌ لا ضمان.
+# ⛔ بلا بيئةٍ ولا سرٍّ غيرِ GITHUB_TOKEN؛ و`actions: write` على هذه الوظيفة وحدها؛ ولا يطبع إلا العدّ.
+name: private-ci-sweeper
+
+on:
+  workflow_run:
+    workflows: [private-ci]
+    types: [completed]
+
+permissions: {}
+
+concurrency:
+  group: private-ci-sweeper-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          sparse-checkout: jobs/private_ci
+      - name: فحص السجل العلني وحذفه عند الاشتباه
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          W="$RUNNER_TEMP/sweep"; mkdir -p "$W/logs"
+          flagged=$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100&filter=all" --paginate \
+            --jq '[.jobs[].steps[]? | select(.name == "طلب حذف السجل" and .conclusion == "success")] | length' 2>/dev/null \
+            | awk '{s+=$1} END {print s+0}')
+          rc=0
+          if gh api "repos/$REPO/actions/runs/$RUN_ID/logs" > "$W/logs.zip" 2>/dev/null \
+             && python3 -c "import sys,zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$W/logs.zip" "$W/logs"; then
+            python3 jobs/private_ci/guard.py --label "السجل العلني" "$W/logs" || rc=$?
+          else
+            echo "الكنّاس: ⚠ تعذّر تنزيلُ السجل (قد يكون محذوفاً) — يُطلب الحذفُ احتياطاً"; rc=2
+          fi
+          echo "الكنّاس: علاماتُ طلب الحذف $flagged · رمزُ الحارس $rc"
+          if [ "$flagged" -gt 0 ] || [ "$rc" -ne 0 ]; then
+            fail=0
+            if gh api -X DELETE "repos/$REPO/actions/runs/$RUN_ID/logs" >/dev/null 2>&1; then
+              echo "الكنّاس: ✅ حُذف سجلُّ التشغيلة"
+            else
+              echo "الكنّاس: ⛔ تعذّر حذفُ السجل — يلزم حذفُه يدويّاً"; fail=1
+            fi
+            if ids=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?per_page=100" --paginate --jq '.artifacts[].id' 2>/dev/null); then
+              n=0; bad=0
+              for id in $ids; do
+                if [[ "$id" =~ ^[0-9]+$ ]] && gh api -X DELETE "repos/$REPO/actions/artifacts/$id" >/dev/null 2>&1; then
+                  n=$((n + 1))
+                else
+                  bad=$((bad + 1))
+                fi
+              done
+              echo "الكنّاس: Artifacts حُذفت $n · تعذّر $bad"
+              [ "$bad" -eq 0 ] || fail=1
+            else
+              echo "الكنّاس: ⛔ تعذّر سردُ Artifacts التشغيلة — يلزم حذفُها يدويّاً"; fail=1
+            fi
+            [ "$fail" -eq 0 ] || exit 1
+          else
+            echo "الكنّاس: ✅ السجلُّ العلنيُّ نظيف — لا حذف"
+          fi

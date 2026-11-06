@@ -1,0 +1,115 @@
+{
+  "_comment": "أنواعُ مهامّ private-ci (v3) وأشواطُها. يقرؤها plan.py وcounts_schema.py وpublish.py وsupervise.sh؛ ولا يُقبل نوعٌ ولا شوطٌ ليس هنا. timeout بالدقائق لكلّ شوط. phases: قائمةُ الأطوار مرتّبةً (id · who: builder يجري بمستخدم pcibuild، runner أمرٌ ثابتٌ في المشرف · emu: يجري داخل خطوة المحاكي · optional: لا يُدرج إلا إن وُسم الشوطُ باسمه مثل lint:true، ولا يُعدّ إلزاميّاً). الأطوارُ غيرُ الاختياريّة (ومعها isolation وclone) إلزاميّةٌ في counts.json (ran). السياقُ public-ci/<النوع> للحالة الواحدة النهائيّة. ⛔ لا recite-switch-emu (يقرأ أسراراً) ولا engine-models (يبقى في الخاص يدويّاً).",
+  "dry-run": {
+    "source": "public",
+    "phases": [
+      {"id": "unit", "who": "builder", "emu": false, "optional": false}
+    ],
+    "legs": [
+      {"id": "main", "timeout": 15}
+    ]
+  },
+  "app-test": {
+    "source": "private",
+    "phases": [
+      {"id": "app_guide", "who": "builder", "emu": false, "optional": false},
+      {"id": "no_blocking", "who": "builder", "emu": false, "optional": false},
+      {"id": "back_handling", "who": "builder", "emu": false, "optional": false},
+      {"id": "i18n_verify", "who": "builder", "emu": false, "optional": false},
+      {"id": "i18n_locale", "who": "builder", "emu": false, "optional": false},
+      {"id": "gradle", "who": "builder", "emu": false, "optional": false}
+    ],
+    "legs": [
+      {"id": "main", "timeout": 40}
+    ]
+  },
+  "engine-test": {
+    "source": "private",
+    "phases": [
+      {"id": "pip", "who": "builder", "emu": false, "optional": false},
+      {"id": "fixture_selftest", "who": "builder", "emu": false, "optional": false},
+      {"id": "fixture_audit", "who": "builder", "emu": false, "optional": false},
+      {"id": "ffmpeg", "who": "builder", "emu": false, "optional": false},
+      {"id": "phoneme_gold", "who": "builder", "emu": false, "optional": false},
+      {"id": "jni", "who": "builder", "emu": false, "optional": false},
+      {"id": "gradle", "who": "builder", "emu": false, "optional": false}
+    ],
+    "legs": [
+      {"id": "main", "timeout": 100}
+    ]
+  },
+  "tasmi-model-emulator-smoke": {
+    "source": "private",
+    "phases": [
+      {"id": "whisper", "who": "builder", "emu": false, "optional": false},
+      {"id": "fatiha", "who": "builder", "emu": false, "optional": false},
+      {"id": "disk", "who": "runner", "emu": false, "optional": false},
+      {"id": "kvm", "who": "runner", "emu": false, "optional": false},
+      {"id": "emu", "who": "builder", "emu": true, "optional": false}
+    ],
+    "legs": [
+      {"id": "api30", "timeout": 60, "emu": {"api": 30, "target": "google_apis", "arch": "x86_64", "profile": "pixel_2", "ram": "2048M"}}
+    ]
+  },
+  "ui-shots-emu": {
+    "source": "private",
+    "phases": [
+      {"id": "request", "who": "builder", "emu": false, "optional": false},
+      {"id": "whisper", "who": "builder", "emu": false, "optional": false},
+      {"id": "disk", "who": "runner", "emu": false, "optional": false},
+      {"id": "kvm", "who": "runner", "emu": false, "optional": false},
+      {"id": "emu", "who": "builder", "emu": true, "optional": false}
+    ],
+    "legs": [
+      {"id": "api34", "timeout": 60, "emu": {"api": 34, "target": "google_apis", "arch": "x86_64", "profile": "pixel_2", "ram": "2048M"}}
+    ]
+  },
+  "hudhud-feature-test": {
+    "source": "private",
+    "phases": [
+      {"id": "whisper", "who": "builder", "emu": false, "optional": false},
+      {"id": "gradle", "who": "builder", "emu": false, "optional": false},
+      {"id": "bundletool", "who": "builder", "emu": false, "optional": false},
+      {"id": "disk", "who": "runner", "emu": false, "optional": false},
+      {"id": "kvm", "who": "runner", "emu": false, "optional": false},
+      {"id": "emu", "who": "builder", "emu": true, "optional": false}
+    ],
+    "legs": [
+      {"id": "api29", "timeout": 60, "emu": {"api": 29, "target": "google_apis", "arch": "x86_64", "profile": "pixel_2", "ram": "2048M"}}
+    ]
+  },
+  "ads-emulator-smoke": {
+    "source": "private",
+    "phases": [
+      {"id": "whisper", "who": "builder", "emu": false, "optional": false},
+      {"id": "disk", "who": "runner", "emu": false, "optional": false},
+      {"id": "kvm", "who": "runner", "emu": false, "optional": false},
+      {"id": "emu", "who": "builder", "emu": true, "optional": false}
+    ],
+    "legs": [
+      {"id": "api29", "timeout": 60, "emu": {"api": 29, "target": "google_apis", "arch": "x86_64", "profile": "pixel_2", "ram": "2048M"}},
+      {"id": "api34", "timeout": 60, "emu": {"api": 34, "target": "google_apis", "arch": "x86_64", "profile": "pixel_2", "ram": "2048M"}}
+    ]
+  },
+  "device-matrix": {
+    "source": "private",
+    "phases": [
+      {"id": "whisper", "who": "builder", "emu": false, "optional": false},
+      {"id": "fatiha", "who": "builder", "emu": false, "optional": false},
+      {"id": "gradle", "who": "builder", "emu": false, "optional": false},
+      {"id": "lint", "who": "builder", "emu": false, "optional": true},
+      {"id": "disk", "who": "runner", "emu": false, "optional": false},
+      {"id": "kvm", "who": "runner", "emu": false, "optional": false},
+      {"id": "emu_smoke", "who": "builder", "emu": true, "optional": false},
+      {"id": "emu_tasmi", "who": "builder", "emu": true, "optional": false}
+    ],
+    "legs": [
+      {"id": "a24-small-x86", "timeout": 75, "lint": true, "emu": {"api": 24, "target": "default", "arch": "x86", "profile": "Nexus S", "ram": "1024M"}},
+      {"id": "a26-phone", "timeout": 75, "emu": {"api": 26, "target": "default", "arch": "x86_64", "profile": "Nexus 5X", "ram": "1536M"}},
+      {"id": "a29-phone", "timeout": 75, "emu": {"api": 29, "target": "default", "arch": "x86_64", "profile": "pixel_2", "ram": "2048M"}},
+      {"id": "a31-tablet", "timeout": 75, "emu": {"api": 31, "target": "default", "arch": "x86_64", "profile": "Nexus 10", "ram": "2048M"}},
+      {"id": "a34-phone", "timeout": 75, "emu": {"api": 34, "target": "google_apis", "arch": "x86_64", "profile": "pixel_6", "ram": "3072M"}},
+      {"id": "a36-phone", "timeout": 75, "emu": {"api": 36, "target": "google_apis", "arch": "x86_64", "profile": "pixel_7", "ram": "3072M"}}
+    ]
+  }
+}

@@ -1,0 +1,34 @@
+# 🧱 **حارسُ نطاق mushafak-ci** — خفيف (ثوانٍ، بلا سرّ)، والفحصُ المطلوبُ في حماية main (D1).
+# يفشل إن: ذكر أيُّ سيرٍ غيرُ private-ci.yml بيئتَي build/publish أو أسرارَهما · أو وُجد سيرٌ غيرُ الثلاثة المعلَنة ·
+# أو فقد private-ci.yml ضمانةً (زنادٌ أوسع · صلاحياتٌ على مستوى السير · إجراءٌ غيرُ مثبَّت · سرٌّ خارج خطوته · cache ·
+# Artifact بغير يومٍ واحد · set -x …) · أو خرج الكنّاسُ عن نطاقه. ويُشغّل اختباراتِ الوحدة كلَّها.
+name: private-ci-scope-guard
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: private-ci-scope-guard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scope-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: PyYAML
+        run: python3 -m pip install --disable-pip-version-check -q "pyyaml==6.0.2"
+      # age: اختباراتُ المشرف والتشفير تُتخطّى بدونه — فلا يُترك أقوى الاختبارات صامتاً في الفحص المطلوب (حزمةُ توزيعةٍ لا إجراءٌ جديد).
+      - name: age لاختبارات المشرف والتشفير
+        run: sudo apt-get update -qq >/dev/null && sudo apt-get install -y -qq age
+      - name: اختبارات الوحدة ونطاق المستودع
+        run: python3 -m unittest discover -s jobs/private_ci -p 'test_*.py' -v
