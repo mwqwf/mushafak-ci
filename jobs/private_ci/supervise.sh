@@ -118,8 +118,10 @@ make_benv(){
         CI=true TERM=dumb LANG=C.UTF-8 PYTHONIOENCODING=utf-8
         "GITHUB_WORKFLOW_REF=${GITHUB_WORKFLOW_REF}" "PCI_KIND=$PCI_KIND" "PCI_LEG=$PCI_LEG" "PCI_LINT=${PCI_LINT:-false}"
         "PCI_SRC=$BSRC" "PCI_BSTATE=$BSTATE" "PCI_BDEVICE=$BDEV" "PCI_WHISPER_REF=$wref" "PCI_RUN_TAG=$tag"
-        # أ2: خادمُ ADB والمحاكي بمستخدم البناء، بمنفذٍ ومجلّداتٍ خاصّةٍ به
-        "ANDROID_ADB_SERVER_PORT=$ADB_PORT" "ADB_SERVER_SOCKET=tcp:127.0.0.1:$ADB_PORT"
+        # أ2: خادمُ ADB والمحاكي بمستخدم البناء، بمنفذٍ ومجلّداتٍ خاصّةٍ به. ⛔ لا ADB_SERVER_SOCKET: adb يعدّ «tcp:127.0.0.1:…» مضيفاً
+        #     بعيداً فيرفض تشغيلَ الخادم («cannot start server on remote host») — سببُ «الإقلاع ⛔» في التجربتين 42282855425 و42283857840.
+        #     ANDROID_ADB_SERVER_PORT وحده يُقلع الخادمَ على localhost بالمنفذ الخاصّ.
+        "ANDROID_ADB_SERVER_PORT=$ADB_PORT"
         "ANDROID_AVD_HOME=$BHOME/.android/avd" "ANDROID_EMULATOR_HOME=$BHOME/.android"
         "PCI_EMU_API=${EMU[0]}" "PCI_EMU_TARGET=${EMU[1]}" "PCI_EMU_ARCH=${EMU[2]}" "PCI_EMU_PROFILE=${EMU[3]}" "PCI_EMU_RAM=${EMU[4]}")
 }
