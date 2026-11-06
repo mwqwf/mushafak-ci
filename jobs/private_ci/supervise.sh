@@ -87,31 +87,34 @@ install_age(){
   bash "$PCI_CTL/encrypt_log.sh" install
 }
 
-setup_builder(){ # ⛔ يجري قبل أوّل سطرٍ غيرِ موثوق
+setup_builder(){ # ⛔ يجري قبل أوّل سطرٍ غيرِ موثوق — وكلُّ خطوةٍ تفشل تُعلَن برمزٍ ثابت (كلمةٌ لا مسار) ليُعرف أين سقطت التهيئة
   local me home sdk tc="/opt/hostedtoolcache"
-  sudo -n useradd --create-home --shell /bin/bash --user-group pcibuild || return 1
-  sudo -n chmod 700 /home/pcibuild || return 1
+  sudo -n useradd --create-home --shell /bin/bash --user-group pcibuild || return "$(setup_fail useradd)"
+  sudo -n chmod 700 /home/pcibuild || return "$(setup_fail home-mode)"
   me="$(id -un)"; home="$(getent passwd "$me" | cut -d: -f6)"
   sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
-  [ -n "$sdk" ] && [ -d "$sdk" ] && [ -n "$home" ] && [ -d "$tc" ] || { say "⛔ لا SDK أو hostedtoolcache أو بيتُ العدّاء"; return 1; }
+  [ -n "$sdk" ] && [ -d "$sdk" ] && [ -n "$home" ] && [ -d "$tc" ] || { say "⛔ لا SDK أو hostedtoolcache أو بيتُ العدّاء"; return "$(setup_fail paths)"; }
   sdk="$(readlink -f "$sdk")"
-  sudo -n install -d -o pcibuild -g pcibuild -m 700 /home/pcibuild/state /home/pcibuild/device || return 1
+  sudo -n install -d -o pcibuild -g pcibuild -m 700 /home/pcibuild/state /home/pcibuild/device || return "$(setup_fail dirs)"
   # نسخةُ build.sh يقرؤها البناءُ ولا يعدّلها (مِلكُ root · لا كتابة)
-  sudo -n install -D -o root -g root -m 0644 "$PCI_CTL/build.sh" /home/pcibuild/ctl/build.sh || return 1
+  sudo -n install -D -o root -g root -m 0644 "$PCI_CTL/build.sh" /home/pcibuild/ctl/build.sh || return "$(setup_fail build-sh)"
   # قراءةُ المشرف لشجرة البناء (تقاريرُ JUnit) بلا فتح البيت لغيره: ACL لمستخدم العدّاء وحدَه
-  sudo -n setfacl -m "u:$me:rx" /home/pcibuild || return 1
+  sudo -n setfacl -m "u:$me:rx" /home/pcibuild || return "$(setup_fail acl)"
   # لا مساحةَ عملٍ ولا _temp ولا _diag ولا .credentials تُقرأ من pcibuild
-  sudo -n chmod 700 "$home" || return 1
+  sudo -n chmod 700 "$home" || return "$(setup_fail runner-home)"
   # لا sudo لغير العدّاء مهما قال sudoers (دفاعٌ في العمق): ثنائيُّ sudo (setuid) يُقصر تنفيذُه على root ومجموعةِ العدّاء الأساسيّة،
   # فلا يصل إليه pcibuild أصلاً — والفحصُ الأوّل من فحوص العزل يُثبت ذلك على العدّاء نفسِه.
-  local sb; sb="$(command -v sudo)" && [ -n "$sb" ] || return 1
-  sudo -n chown "root:$(id -g)" "$sb" && sudo -n chmod 4750 "$sb" || return 1
-  sudo -n true || { say "⛔ sudo تعطّل بعد تقييده"; return 1; }
+  # ⛔ chown يمسح بِتَّ setuid (لينكس يعامل root كغيره هنا) ⇒ chown وchmod في استدعاء sudo **واحد**، وإلا فقد sudo نفسُه صلاحيتَه بين الأمرين
+  #    (وقعت فعلاً: التجربة الجافّة 42248836438 «لم تكتمل التهيئة»).
+  local sb; sb="$(command -v sudo)" && [ -n "$sb" ] || return "$(setup_fail sudo-path)"
+  sudo -n sh -c 'chown "root:$2" "$1" && chmod 4750 "$1"' _ "$sb" "$(id -g)" || return "$(setup_fail sudo-restrict)"
+  sudo -n true || { say "⛔ sudo تعطّل بعد تقييده"; return "$(setup_fail sudo-check)"; }
   # حقيقتان من مصدر صورة العدّاء: SDK بـa+rwx وhostedtoolcache بـ777 ⇒ تُحصَّنان (فلا يستبدل البناءُ adb/emulator/JDK)
-  sudo -n chown -R -H "$me:$me" "$sdk" "$tc" || return 1
-  sudo -n chmod -R o-w "$sdk" "$tc" || return 1
+  sudo -n chown -R -H "$me:$me" "$sdk" "$tc" || return "$(setup_fail sdk-own)"
+  sudo -n chmod -R o-w "$sdk" "$tc" || return "$(setup_fail sdk-mode)"
   return 0
 }
+setup_fail(){ pub "التهيئة: ⛔ $1"; echo 1; }   # رمزٌ ثابتٌ علناً (لا مسارَ ولا اسمَ مستخدمٍ ولا مخرجاتِ أمر) ويعيد رمزَ الفشل للـreturn
 
 harden_path_dirs(){ # D11: كلُّ مجلّدٍ في PATH الوظيفة يكتب فيه pcibuild يُملَّك للعدّاء بلا كتابةٍ لغيره
   # (وإلا وضع فيه `bash` أو `sudo` أو `python3` مزيَّفاً تنفّذه خطواتٌ موثوقةٌ بصلاحية runner)
