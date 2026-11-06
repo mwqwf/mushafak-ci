@@ -1025,6 +1025,10 @@ class SupervisorTest(unittest.TestCase):
         self.assertEqual(kinds["dry-run-emu"]["legs"][0]["emu"]["target"], "default")
         build = readf(os.path.join(HERE, "build.sh"))
         self.assertIn("stress_tree)      stress_tree ;;", build)
+        # درسُ التجربة 42282855425: صورةُ النظام تُثبَّت بـumask 022 وتُفتح للقراءة (المشرفُ بـumask 077 وإلا فلا يقرؤها مستخدمُ البناء)
+        si = code[code.index("emu_sysimg(){"):code.index("run_runner_phase(){")]
+        self.assertIn('( umask 022; SDKMANAGER_OPTS=', si)
+        self.assertIn('chmod -R go-w,a+rX "$sdk/system-images" "$sdk/emulator" "$sdk/platform-tools"', si)
 
 class IsoProbeTest(unittest.TestCase):
     """أ2: مسبارُ المقابس — الجردُ يلتقط مقابسَ الحساب ومجموعاته (لا مجموعات البناء)، والاتّصالُ يُعدّ ولا يطبع اسماً."""
