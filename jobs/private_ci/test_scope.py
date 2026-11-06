@@ -11,7 +11,9 @@
      finalize وخطوةُ الرفع شرطُها نصّاً `always() && steps.fin.outputs.ready == 'true'` (يُمسك always() وحده) ولا خطوةَ بعد prep
      تستدعي أدواتٍ من مساحة العمل (كلُّها من $RUNNER_TEMP/pci/ctl) · لا set -x ولا طباعةَ للسجلّ · publish بـalways() · بلا إلغاءٍ متزامن؛
   ٤. خرج الكنّاسُ عن workflow_run و`actions: write` على وظيفته وحدها وGITHUB_TOKEN وحده؛
-  ٥. فقد سكربتٌ ‎.sh شرطَ الاستدعاء من private-ci.yml قبل أوّل أمر، أو حمل set -x، أو حمل `sudo` وهو غيرُ supervise.sh (D11).
+  ٥. فقد سكربتٌ ‎.sh شرطَ الاستدعاء من private-ci.yml قبل أوّل أمر، أو حمل set -x، أو حمل `sudo` وهو غيرُ supervise.sh (D11)؛
+  ٦. (الإصلاح الرابع · 13-ج) عاد إجراءُ محاكٍ يعمل بحساب العدّاء، أو استدعى المشرفُ adb/emulator/avdmanager بنفسه (أ2)، أو عاد مدخلُ
+     التحكّم إلى بيت pcibuild (أ1)، أو ذكر سيرٌ متغيّراً PCI_TEST_* (أ2-٤)، أو لم تكن مهلةُ build هي job_timeout (أ4).
 """
 import os
 import re
@@ -33,8 +35,8 @@ SECRETS = {"PCI_DEPLOY_KEY_B64", "PRIVATE_CI_R2_JSON", "PCI_STATUS_TOKEN"}
 SHA_PIN = re.compile(r"^[\w.-]+/[\w.-]+(?:/[\w./-]+)?@[0-9a-f]{40}$")
 ALLOWED_USES = {
     "plan": {"actions/checkout"},
-    "build": {"actions/checkout", "actions/setup-java", "reactivecircus/android-emulator-runner",
-              "actions/upload-artifact"},
+    # أ2: لا إجراءَ محاكٍ — المحاكي وADB بمستخدم البناء داخل أطوار المشرف
+    "build": {"actions/checkout", "actions/setup-java", "actions/upload-artifact"},
     "publish": {"actions/checkout", "actions/download-artifact"},
 }
 JOB_PERMS = {"plan": {"contents": "read"}, "build": {"contents": "read"},
@@ -152,6 +154,10 @@ def main_violations(text):
         v.append(f"{MAIN}: يطبع السجلّ")
     if "pull_request_target" in text or "workflow_call" in text:
         v.append(f"{MAIN}: زنادٌ ممنوع في النصّ")
+    if "PCI_TEST_" in text:
+        v.append(f"{MAIN}: متغيّرُ اختبارٍ PCI_TEST_* في السير")
+    if "android-emulator-runner" in text:
+        v.append(f"{MAIN}: إجراءُ محاكٍ بحساب العدّاء")
     jobs = d.get("jobs") or {}
     if set(jobs) != {"plan", "build", "publish"}:
         v.append(f"{MAIN}: الوظائفُ غيرُ plan/build/publish")
@@ -213,6 +219,8 @@ def main_violations(text):
                 v.append(f"{MAIN}/publish: خطوةٌ تنفّذ غيرَ publish.py")
         if jid == "publish" and "always()" not in str(job.get("if", "")):
             v.append(f"{MAIN}/publish: بلا always()")
+        if jid == "build" and str(job.get("timeout-minutes")) != "${{ matrix.leg.job_timeout }}":
+            v.append(f"{MAIN}/build: المهلةُ يجب أن تكون job_timeout (الميزانية + هامش finalize)")
         if jid == "build" and job.get("name") != "build-${{ matrix.leg.id }}":
             v.append(f"{MAIN}/build: اسمُ الوظيفة يجب أن يكون build-<شوط> (يقرؤه publish)")
     for sec, n in seen_secret.items():
@@ -290,8 +298,16 @@ def sweeper_violations(text):
 def scope_wf_violations(text):
     v = []
     d = parse(text)
-    if set((d.get("on") or {})) != {"pull_request", "push"}:
-        v.append(f"{SCOPE}: الزنادُ غيرُ pull_request وpush")
+    on = d.get("on") or {}
+    # الزنادُ ثلاثةٌ بعينها: pull_request · push إلى main وحده · workflow_dispatch بلا مدخلات (تشغيلٌ يدويٌّ للفحص نفسِه)
+    if set(on) != {"pull_request", "push", "workflow_dispatch"}:
+        v.append(f"{SCOPE}: الزنادُ غيرُ pull_request وpush وworkflow_dispatch")
+    if (on.get("push") or {}).get("branches") != ["main"] or set(on.get("push") or {}) != {"branches"}:
+        v.append(f"{SCOPE}: push لغير main وحده")
+    if on.get("workflow_dispatch") not in (None, {}):
+        v.append(f"{SCOPE}: workflow_dispatch بمدخلات")
+    if "secrets." in text:
+        v.append(f"{SCOPE}: سرٌّ في الفحص")
     for jid, job in (d.get("jobs") or {}).items():
         if job.get("permissions") != {"contents": "read"}:
             v.append(f"{SCOPE}/{jid}: أذوناتٌ غيرُ contents: read")
@@ -312,6 +328,14 @@ def sh_violations(jobs_dir):
         # D11: sudo للمشرف وحده (التهيئةُ والتحصينُ والأوامرُ الثابتةُ) — لا في build.sh ولا clone.sh ولا غيرِهما
         if name != SUPERVISOR and re.search(r"(?m)^[^#\n]*\bsudo\b", body):
             v.append(f"jobs/private_ci/{name}: sudo خارج supervise.sh")
+        if name == SUPERVISOR:
+            # أ2: المشرفُ (حسابُ العدّاء) لا يشغّل adb ولا المحاكي ولا avdmanager — تلك بمستخدم البناء وحده
+            if re.search(r"(?m)^[^#\n]*(?:platform-tools/adb|emulator/emulator|\bavdmanager\b|\badb\s+(?:start-server|-s|shell|kill))",
+                         body):
+                v.append(f"jobs/private_ci/{name}: المشرفُ يشغّل adb أو المحاكي")
+            # أ1: مدخلُ التحكّم في شجرةٍ يملكها root لا في بيت مستخدم البناء
+            if 'CTL_DIR="/var/lib/pci-ctl"' not in body or "/home/pcibuild/ctl" in body:
+                v.append(f"jobs/private_ci/{name}: مدخلُ التحكّم ليس في /var/lib/pci-ctl")
     if SUPERVISOR not in set(os.listdir(jobs_dir)):
         v.append(f"jobs/private_ci/{SUPERVISOR}: غائب")
     return v
@@ -361,6 +385,23 @@ class ScopeNegativeTest(unittest.TestCase):
         self.assertNotEqual(sw2, self.files[SWEEPER])
         self.assertCaught(dict(self.files, **{SWEEPER: sw2}), "sweeper-perms")
 
+    def test_weakened_scope_guard_is_caught(self):
+        """الزنادُ اليدويُّ أُضيف بقاعدةٍ أدقّ: لا مدخلات · push إلى main وحده · لا سرّ · لا زنادَ رابع."""
+        base = self.files[SCOPE]
+        self.assertEqual(scope_wf_violations(base), [])
+        muts = {
+            "inputs": base.replace("  workflow_dispatch:\n", "  workflow_dispatch:\n    inputs:\n      x:\n        required: false\n", 1),
+            "push-any": base.replace("    branches: [main]\n", "    branches: ['**']\n", 1),
+            "push-tags": base.replace("    branches: [main]\n", "    branches: [main]\n    tags: ['*']\n", 1),
+            "fourth": base.replace("  workflow_dispatch:\n", "  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\n", 1),
+            "secret": base.replace("persist-credentials: false", "persist-credentials: false\n          token: ${{ secrets.X }}", 1),
+            "perms": base.replace("      contents: read\n", "      contents: write\n", 1),
+        }
+        for label, text in muts.items():
+            with self.subTest(label=label):
+                self.assertNotEqual(text, base)
+                self.assertCaught(dict(self.files, **{SCOPE: text}), label)
+
     def test_weakened_private_ci_is_caught(self):
         good = self.files[MAIN]
         BLD = '        run: bash "$RUNNER_TEMP/pci/ctl/supervise.sh" build\n'
@@ -406,6 +447,13 @@ class ScopeNegativeTest(unittest.TestCase):
             "checkout-other": good.replace("          sparse-checkout: jobs/private_ci\n          path: ctl\n",
                                            "          sparse-checkout: jobs/private_ci\n          path: ctl\n          ref: main\n", 1),
             "extra-job": good + "\n  extra:\n    runs-on: ubuntu-latest\n    timeout-minutes: 1\n    permissions: {}\n    steps: []\n",
+            # الإصلاح الرابع
+            "emu-action-back": good.replace('        run: bash "$RUNNER_TEMP/pci/ctl/supervise.sh" emu\n',
+                                            "        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d\n"
+                                            '        with:\n          script: bash "$RUNNER_TEMP/pci/ctl/supervise.sh" emu\n', 1),
+            "test-flag-in-env": good.replace("      PCI_LINT: ${{ matrix.leg.lint }}\n",
+                                             "      PCI_LINT: ${{ matrix.leg.lint }}\n      PCI_TEST_NO_ISOLATION: '1'\n", 1),
+            "budget-timeout": good.replace("timeout-minutes: ${{ matrix.leg.job_timeout }}", "timeout-minutes: ${{ matrix.leg.timeout }}", 1),
         }
         for label, text in m.items():
             with self.subTest(m=label):
@@ -434,7 +482,7 @@ class ScopeNegativeTest(unittest.TestCase):
             def put(name, body):
                 with open(os.path.join(d, name), "w") as f:
                     f.write(guard_head + body)
-            put(SUPERVISOR, "sudo -n true\n")
+            put(SUPERVISOR, 'CTL_DIR="/var/lib/pci-ctl"\nsudo -n true\n')
             put("build.sh", "# بلا sudo أبداً\necho ok\n")
             self.assertEqual(sh_violations(d), [])
             put("build.sh", "echo ok\nsudo -n rm -rf /x\n")
@@ -445,6 +493,26 @@ class ScopeNegativeTest(unittest.TestCase):
             self.assertTrue(any("clone.sh" in x for x in sh_violations(d)))
             os.remove(os.path.join(d, SUPERVISOR))
             self.assertTrue(any(SUPERVISOR in x for x in sh_violations(d)))
+
+    def test_supervisor_never_runs_adb_and_keeps_control_entry_root_owned(self):
+        """أ1 · أ2: طفراتٌ في المشرف يمسكها الحارس — adb/المحاكي بحساب العدّاء، أو مدخلُ التحكّم في بيت pcibuild."""
+        import tempfile
+        good = read(os.path.join(HERE, SUPERVISOR))
+        self.assertEqual([x for x in sh_violations(HERE) if SUPERVISOR in x], [])
+        muts = {
+            "adb": good.replace("  ran_add cleanup\n", '  ran_add cleanup\n  "$sdk/platform-tools/adb" kill-server\n', 1),
+            "adb-shell": good.replace("  ran_add cleanup\n", "  ran_add cleanup\n  adb -s emulator-5554 emu kill\n", 1),
+            "emulator": good.replace("  ran_add cleanup\n", '  ran_add cleanup\n  "$sdk/emulator/emulator" -avd x &\n', 1),
+            "avdmanager": good.replace("  ran_add cleanup\n", "  ran_add cleanup\n  avdmanager delete avd -n pci\n", 1),
+            "ctl-in-home": good.replace('CTL_DIR="/var/lib/pci-ctl"', 'CTL_DIR="/home/pcibuild/ctl"', 1),
+        }
+        with tempfile.TemporaryDirectory() as d:
+            for label, body in muts.items():
+                with self.subTest(m=label):
+                    self.assertNotEqual(body, good, label)
+                    with open(os.path.join(d, SUPERVISOR), "w", encoding="utf-8") as f:
+                        f.write(body)
+                    self.assertTrue(any(SUPERVISOR in x for x in sh_violations(d)), label)
 
 
 if __name__ == "__main__":

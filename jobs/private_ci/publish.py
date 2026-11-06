@@ -38,6 +38,8 @@ SHA_RE = re.compile(r"[0-9a-f]{40}")
 EXPECTED_FILES = artifact_check.EXPECTED_FILES
 MAX_BUILD_LOG = 32 * 1024 * 1024   # D18: حدُّ ما يُقرأ من سجلّ وظيفة build العلنيّ (والمشرفُ يقطع السجلَّ عند حدٍّ دون ذلك أصلاً)
 LOG_HOST_SUFFIXES = (".actions.githubusercontent.com", ".blob.core.windows.net")
+MAX_REDIRECTS = 3                  # أ9: التحويلاتُ تُتابَع يدويّاً حتى ثلاث قفزات، ويُفحص مضيفُ كلّ Location قبل القفزة
+REDIRECT_CODES = (301, 302, 303, 307, 308)
 
 
 # ───── الحكمُ المركَّب ─────
@@ -114,7 +116,7 @@ def read_legs(in_dir, kind, sha, kinds):
 
 # ───── الحارس على سجلّات build العلنيّة ─────
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *a, **k):  # ⛔ لا يُحمل رمزُ GitHub إلى مضيف التخزين في التحويل
+    def redirect_request(self, *a, **k):  # ⛔ لا تحويلَ تلقائيّ في أيّ طلب: كلُّ قفزةٍ يفحصها fetch_build_logs بنفسه (أ9)
         return None
 
 
@@ -126,8 +128,9 @@ def _api(url, token, opener):
 
 
 def default_openers():
+    """كلا الفاتحَين بلا تحويلٍ تلقائيّ (أ9): لا urlopen الافتراضيّ الذي يتبع Location إلى أيّ مضيف."""
     no_redirect = urllib.request.build_opener(_NoRedirect)
-    return no_redirect.open, urllib.request.urlopen
+    return no_redirect.open, no_redirect.open
 
 
 def _log_host_ok(url):
@@ -165,20 +168,33 @@ def fetch_build_logs(repo, run_id, attempt, token, legs_expected, api_open=None,
         raise RuntimeError("job-count")
     texts = []
     for j in builds:
-        try:
-            resp = _api(f"https://api.github.com/repos/{repo}/actions/jobs/{int(j['id'])}/logs", token, api_open)
-            with resp as r:
-                data = _read_capped(r)
-        except urllib.error.HTTPError as e:
-            if e.code not in (301, 302, 303, 307, 308):
-                raise RuntimeError("logs-status")
-            loc = e.headers.get("Location", "")
-            if not _log_host_ok(loc):
-                raise RuntimeError("logs-host")
-            with plain_open(urllib.request.Request(loc), timeout=120) as r2:
-                data = _read_capped(r2)
+        data = _follow(f"https://api.github.com/repos/{repo}/actions/jobs/{int(j['id'])}/logs", token, api_open, plain_open)
         texts.append(data.decode("utf-8", errors="replace"))
     return texts
+
+
+def _follow(url, token, api_open, plain_open):
+    """أ9: الطلبُ الأوّل وحده إلى api.github.com يحمل Authorization؛ وكلُّ تحويلٍ يُتابَع يدويّاً حتى MAX_REDIRECTS قفزات،
+    ويُفحص مضيفُ كلّ Location ضدّ القائمة **قبل** القفزة (عنوانٌ مطلقٌ بـhttps وحده — لا نسبيَّ ولا بلا مخطّط)، والقفزاتُ بلا
+    أيّ ترويسة اعتماد."""
+    hops = 0
+    while True:
+        try:
+            if hops == 0:
+                resp = _api(url, token, api_open)
+            else:
+                resp = plain_open(urllib.request.Request(url), timeout=120)
+            with resp as r:
+                return _read_capped(r)
+        except urllib.error.HTTPError as e:
+            if e.code not in REDIRECT_CODES:
+                raise RuntimeError("logs-status")
+            if hops >= MAX_REDIRECTS:
+                raise RuntimeError("logs-hops")
+            nxt = (e.headers.get("Location", "") if e.headers is not None else "") or ""
+            if not _log_host_ok(nxt):
+                raise RuntimeError("logs-host")
+            url, hops = nxt, hops + 1
 
 
 def guard_texts(texts):

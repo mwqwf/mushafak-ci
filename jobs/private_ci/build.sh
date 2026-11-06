@@ -79,6 +79,34 @@ ui_shots_request(){ # صنفُ اللقطات ومتغيّرُها من ملفّ
   printf '%s\n%s\n' "$cls" "$var" > "$PCI_BSTATE/ui_shots_req"
 }
 
+emu_up(){ # أ2: المحاكي وخادمُ ADB **بمستخدم البناء نفسِه** (لا بحساب العدّاء) — فلا جسرَ من البناء إلى صلاحية العدّاء عبر ADB.
+  #   المعاملاتُ من المشرف (kinds.json الموثوق بأنماطٍ مغلقة) وتُفحص هنا ثانيةً؛ وخادمُ ADB بمنفذٍ خاصّ (ANDROID_ADB_SERVER_PORT)
+  #   والـAVD تحت بيت البناء؛ وصورةُ النظام ثبّتها المشرفُ (sysimg) في SDK المحصَّن الذي لا يكتبه هذا المستخدم.
+  local api="${PCI_EMU_API:-}" target="${PCI_EMU_TARGET:-}" arch="${PCI_EMU_ARCH:-}" profile="${PCI_EMU_PROFILE:-}" ram="${PCI_EMU_RAM:-}"
+  [[ "$api" =~ ^[0-9]{2}$ && "$target" =~ ^[a-z_]{1,32}$ && "$arch" =~ ^(x86|x86_64)$ && "$profile" =~ ^[A-Za-z0-9\ _]{1,32}$ \
+     && "$ram" =~ ^[0-9]{3,5}M$ ]] || { say "⛔ معاملاتُ المحاكي غيرُ صالحة"; return 1; }
+  [[ "${ANDROID_ADB_SERVER_PORT:-}" =~ ^[0-9]{4,5}$ ]] || { say "⛔ لا منفذَ خاصّاً لخادم ADB"; return 1; }
+  local sdk="${ANDROID_HOME:?}" avd="${ANDROID_AVD_HOME:?}" i boot=""
+  mkdir -p "$avd"
+  echo no | "$sdk/cmdline-tools/latest/bin/avdmanager" -s create avd --force -n pci \
+    -k "system-images;android-$api;$target;$arch" -d "$profile" || return 1
+  printf 'hw.ramSize=%s\n' "${ram%M}" >> "$avd/pci.avd/config.ini"
+  adb start-server || return 1
+  # جلسةٌ خاصّة ومخرجاتٌ إلى ملفٍّ في بيت البناء (لا يُمسك أنبوبَ الطور فلا يُعطّل مصرفَه)
+  setsid "$sdk/emulator/emulator" -avd pci -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none \
+    -no-snapshot -port 5554 > "$PCI_BSTATE/emulator.log" 2>&1 < /dev/null &
+  timeout 600 adb -s emulator-5554 wait-for-device || { say "⛔ المحاكي لم يظهر"; return 1; }
+  for i in $(seq 1 120); do
+    boot="$(timeout 20 adb -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
+    [ "$boot" = 1 ] && break
+    sleep 5
+  done
+  [ "$boot" = 1 ] || { say "⛔ المحاكي لم يكمل الإقلاع"; return 1; }
+  for i in window_animation_scale transition_animation_scale animator_duration_scale; do
+    adb -s emulator-5554 shell settings put global "$i" 0.0 || return 1
+  done
+}
+
 emu_phase(){ # طورُ «emu» في الأنواع ذات المحاكي الواحد
   local cls var
   case "$PCI_KIND" in
@@ -130,6 +158,7 @@ run_phase(){
     request)          ui_shots_request ;;
     bundletool)       curl -fsSL -o bundletool.jar https://github.com/google/bundletool/releases/download/1.18.3/bundletool-all-1.18.3.jar ;;
     lint)             gradle :app:lintDebug ;;
+    emu_up)           emu_up ;;
     emu)              emu_phase ;;
     emu_smoke)        bash tools/qa/device_smoke.sh "$(ls app/build/outputs/apk/debug/*.apk | head -1)" "$PCI_BDEVICE" "$PCI_LEG" ;;
     emu_tasmi)        bash tools/qa/tasmi_device.sh "$(ls app/build/outputs/apk/androidTest/debug/*.apk | head -1)" "$PCI_BDEVICE" ;;
@@ -141,6 +170,14 @@ run_phase(){
                       printf '0\n' > "$PCI_BSTATE/rc_selftest_forge"; printf 'selftest_forge\n' >> "$PCI_BSTATE/ran.txt"
                       printf '0\n' > "$PCI_BSTATE/rc_selftest_fail"; false ;;
     selftest_env)     env | sort ;;
+    selftest_tamper)  # أ1: يحاول تبديلَ مدخل التحكّم (في الإنتاج يملكه root فيفشل؛ ومحلّيّاً يكشفه المشرفُ قبل الطور التالي)
+                      printf '\n# tampered\n' >> "$HOME/ctl/build.sh" ;;
+    selftest_linger)  # أ3: عمليّةٌ تهرب من جلسة الطور وتبقى بعده — يجب أن يقتلها التنظيفُ أو يمنعَ قراءةَ الشجرة
+                      setsid sleep 300 > /dev/null 2>&1 < /dev/null & true ;;
+    selftest_hold)    # أ4: عمليّةٌ خلفيّةٌ تمسك مخرجَ الطور مفتوحاً بعد انتهائه — لا يُنتظر EOF منها
+                      sleep 300 & true ;;
+    selftest_sleep)   sleep 300 ;;
+    selftest_limits)  ulimit -u ;;
     *) say "⛔ طورٌ غيرُ معروف"; return 2 ;;
   esac
 }
