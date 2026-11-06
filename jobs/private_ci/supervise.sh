@@ -102,6 +102,11 @@ setup_builder(){ # ⛔ يجري قبل أوّل سطرٍ غيرِ موثوق
   sudo -n setfacl -m "u:$me:rx" /home/pcibuild || return 1
   # لا مساحةَ عملٍ ولا _temp ولا _diag ولا .credentials تُقرأ من pcibuild
   sudo -n chmod 700 "$home" || return 1
+  # لا sudo لغير العدّاء مهما قال sudoers (دفاعٌ في العمق): ثنائيُّ sudo (setuid) يُقصر تنفيذُه على root ومجموعةِ العدّاء الأساسيّة،
+  # فلا يصل إليه pcibuild أصلاً — والفحصُ الأوّل من فحوص العزل يُثبت ذلك على العدّاء نفسِه.
+  local sb; sb="$(command -v sudo)" && [ -n "$sb" ] || return 1
+  sudo -n chown "root:$(id -g)" "$sb" && sudo -n chmod 4750 "$sb" || return 1
+  sudo -n true || { say "⛔ sudo تعطّل بعد تقييده"; return 1; }
   # حقيقتان من مصدر صورة العدّاء: SDK بـa+rwx وhostedtoolcache بـ777 ⇒ تُحصَّنان (فلا يستبدل البناءُ adb/emulator/JDK)
   sudo -n chown -R -H "$me:$me" "$sdk" "$tc" || return 1
   sudo -n chmod -R o-w "$sdk" "$tc" || return 1
@@ -127,9 +132,10 @@ isolation_tests(){ # يضبط ISO_N وISO_OK؛ ما يجب أن يفشل وما 
   local sdk tc="/opt/hostedtoolcache" me home
   me="$(id -un)"; home="$(getent passwd "$me" | cut -d: -f6)"
   sdk="$(readlink -f "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}")"
-  ISO_N=0; ISO_OK=0
-  must_fail(){ ISO_N=$((ISO_N + 1)); if as_builder "$@" >/dev/null 2>&1; then say "⛔ عزلٌ مفقود (فحصٌ $ISO_N)"; else ISO_OK=$((ISO_OK + 1)); fi; }
-  must_pass(){ ISO_N=$((ISO_N + 1)); if as_builder "$@" >/dev/null 2>&1; then ISO_OK=$((ISO_OK + 1)); else say "⛔ وصولٌ لازمٌ مفقود (فحصٌ $ISO_N)"; fi; }
+  ISO_N=0; ISO_OK=0; ISO_BAD=""   # ISO_BAD: أرقامُ الفحوص الفاشلة (أعدادٌ فقط — تُعلَن ليُعرف أيُّ فحصٍ سقط بلا كشف شيء)
+  iso_bad(){ ISO_BAD="${ISO_BAD:+$ISO_BAD,}$ISO_N"; }
+  must_fail(){ ISO_N=$((ISO_N + 1)); if as_builder "$@" >/dev/null 2>&1; then say "⛔ عزلٌ مفقود (فحصٌ $ISO_N)"; iso_bad; else ISO_OK=$((ISO_OK + 1)); fi; }
+  must_pass(){ ISO_N=$((ISO_N + 1)); if as_builder "$@" >/dev/null 2>&1; then ISO_OK=$((ISO_OK + 1)); else say "⛔ وصولٌ لازمٌ مفقود (فحصٌ $ISO_N)"; iso_bad; fi; }
   must_fail bash -c 'sudo -n true'
   must_fail bash -c 'cat "/proc/$1/environ"' _ "$$"
   must_fail bash -c 'ls "$1"' _ "$RUNNER_TEMP"
@@ -138,13 +144,14 @@ isolation_tests(){ # يضبط ISO_N وISO_OK؛ ما يجب أن يفشل وما 
   must_fail test -r "$PCI_CTL/supervise.sh"
   must_fail bash -c 'ls "$1"' _ "$home"
   # لا مجلّدَ في PATH الوظيفة (ولا في مسار المشرف) يكتب فيه pcibuild
-  ISO_N=$((ISO_N + 1)); local d bad=0; local IFS=:
+  ISO_N=$((ISO_N + 1)); local d bad=0 pos=0 badpos=""; local IFS=:
   for d in $JOB_PATH:$PATH; do
+    pos=$((pos + 1))
     [ -n "$d" ] && [ -d "$d" ] || continue
-    if as_builder test -w "$d" >/dev/null 2>&1; then bad=1; fi
+    if as_builder test -w "$d" >/dev/null 2>&1; then bad=1; badpos="${badpos:+$badpos,}$pos"; say "⛔ مجلّدٌ في PATH يكتب فيه pcibuild: $d"; fi
   done
   IFS=$' \t\n'
-  if [ "$bad" = 0 ]; then ISO_OK=$((ISO_OK + 1)); else say "⛔ مجلّدٌ في PATH يكتب فيه pcibuild (فحصٌ $ISO_N)"; fi
+  if [ "$bad" = 0 ]; then ISO_OK=$((ISO_OK + 1)); else say "⛔ مجلّدٌ في PATH يكتب فيه pcibuild (فحصٌ $ISO_N)"; iso_bad; pub "العزل: مواضعُ PATH الكاتبة: $badpos"; fi
   must_pass bash -c 'test -x "$JAVA_HOME/bin/java"'
   must_pass bash -c 'test -r "$ANDROID_HOME" && ls "$ANDROID_HOME" >/dev/null'
   must_pass bash -c 'touch "$HOME/.probe"'
@@ -177,7 +184,7 @@ do_prepare(){
     make_benv
     isolation_tests
     [ "$ISO_OK" = "$ISO_N" ] || rc=1
-    [ "$rc" = 0 ] && pub "العزل: ✅ $ISO_OK/$ISO_N" || pub "العزل: ⛔ $ISO_OK/$ISO_N"
+    [ "$rc" = 0 ] && pub "العزل: ✅ $ISO_OK/$ISO_N" || pub "العزل: ⛔ $ISO_OK/$ISO_N — الفاشل: ${ISO_BAD:-?}"
   else
     pub "العزل: ⛔ لم تكتمل التهيئة"
   fi

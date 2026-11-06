@@ -57,6 +57,8 @@ def compose(plan_ok, legs, guard_state, upload_state, dry=False):
     # ٢) التعذّرات
     if not legs or any(not leg["present"] for leg in legs):
         return "error", "artifact"
+    if any(leg["schema_ok"] and "isolation" in (leg["counts"].get("failed_phase_ids") or []) for leg in legs):
+        return "error", "isolation"   # العزلُ لم يثبت على العدّاء ⇒ لا استنساخَ أصلاً (يُقدَّم على «تعذّر الاستنساخ»)
     if any(not leg["counts"]["clone_ok"] for leg in legs):
         return "error", "clone"
     if guard_state != "clean":

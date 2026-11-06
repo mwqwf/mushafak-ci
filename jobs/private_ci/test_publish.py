@@ -41,6 +41,15 @@ def leg(present=True, schema_ok=True, ok=True, clone_ok=True):
 
 
 class ComposeTest(unittest.TestCase):
+    def test_isolation_failure_is_its_own_reason(self):
+        """فشلُ العزل (لا استنساخَ بعده) يُحكم «isolation» لا «clone» — ليُعرف السببُ من الحالة الواحدة."""
+        c = cs.make_counts("app-test", "main", SHA, {"isolation": 1, "cleanup": 0}, (0, 0, 0, 0, 0), None,
+                           ["isolation", "cleanup"], KINDS)
+        self.assertEqual((c["clone_ok"], c["failed_phase_ids"]), (False, ["isolation"]))
+        l = {"id": "main", "present": True, "schema_ok": True, "counts": c}
+        self.assertEqual(pub.compose(True, [l], "clean", "skipped", dry=True), ("error", "isolation"))
+        self.assertEqual(pub.compose(True, [l], "clean", "verified"), ("error", "isolation"))
+
     def test_all_sixteen_combinations(self):
         """{اختبارات ناجحة/فاشلة} × {حارس نظيف/مشتبه} × {رفع محقَّق/متعذّر} × {مخطّط صحيح/مرفوض}."""
         for tests_ok, guard_clean, upload_ok, schema_ok in itertools.product([True, False], repeat=4):
