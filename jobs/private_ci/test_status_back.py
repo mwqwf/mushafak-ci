@@ -20,6 +20,16 @@ class StatusTest(unittest.TestCase):
         self.assertIn("5 اختباراً", p["description"])
         self.assertLessEqual(len(p["description"]), 140)
 
+    def test_description_excluded_count_is_a_number_only_and_optional(self):
+        t = {"tests": 3082, "failures": 0, "errors": 0}
+        self.assertIn("3 مستثناةً بالتصميم", sb.build_payload("success", "app-test", "ok", t, RUN, 3)["description"])
+        self.assertNotIn("مستثناةً", sb.build_payload("success", "app-test", "ok", t, RUN)["description"])
+        self.assertNotIn("مستثناةً", sb.build_payload("success", "app-test", "ok", t, RUN, 0)["description"])
+        self.assertNotIn("مستثناةً", sb.build_description("error", "plan", None, 3))     # بلا أعدادٍ لا يُذكر
+        with self.assertRaises(ValueError):
+            sb.build_payload("success", "app-test", "ok", t, RUN, "x")                    # ليس رقماً ⇒ لا نصٌّ حرٌّ يعبر
+        self.assertLessEqual(len(sb.build_description("failure", "isolation", {"tests": 999999, "failures": 999999, "errors": 999999}, 999)), 140)
+
     def test_only_final_states_and_known_kinds(self):
         for st in ("pending", "ok", ""):
             with self.subTest(st=st), self.assertRaises(ValueError):

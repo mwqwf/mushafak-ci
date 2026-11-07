@@ -130,6 +130,40 @@ def make_art(root, leg_id, files):
     return d
 
 
+class ExcludedCountTest(unittest.TestCase):
+    """🚧 عددُ الدوالّ المستثناةِ بالتصميم في وصف الحالة: يُذكر فقط إن نجح حارسُها في كلّ شوطٍ صالح."""
+
+    def valid_leg(self, kind="app-test", fail=()):
+        ran = ["isolation", "clone"] + [p["id"] for p in KINDS[kind]["phases"] if not p.get("optional")]
+        c = cs.make_counts(kind, "main", SHA, {p: (1 if p in fail else 0) for p in ran}, (10, 0, 0, 0, 1), None, ran, KINDS)
+        return {"id": "main", "present": True, "schema_ok": True, "counts": c}
+
+    def test_counts_the_three_when_the_guard_phase_passed(self):
+        self.assertEqual(pub.excluded_count("app-test", [self.valid_leg()]), 3)
+
+    def test_zero_when_the_guard_phase_failed_or_is_absent(self):
+        self.assertEqual(pub.excluded_count("app-test", [self.valid_leg(fail=("forbidden_excludes",))]), 0)
+        l = self.valid_leg()
+        l["counts"]["ran"] = [p for p in l["counts"]["ran"] if p != "forbidden_excludes"]
+        self.assertEqual(pub.excluded_count("app-test", [l]), 0)
+
+    def test_zero_without_valid_legs_and_for_kinds_without_entries(self):
+        self.assertEqual(pub.excluded_count("app-test", []), 0)
+        self.assertEqual(pub.excluded_count("app-test", [{"id": "main", "present": True, "schema_ok": False, "counts": None}]), 0)
+        self.assertEqual(pub.excluded_count("engine-test", [self.valid_leg("engine-test")]), 0)
+
+    def test_summary_and_description_carry_only_the_number(self):
+        import status_back as sb
+        md = pub.summary_md("app-test", "success", "ok", [self.valid_leg()], 3)
+        self.assertIn("**مستثنى بالتصميم:** 3 دالّةً", md)
+        self.assertNotIn("مستثنى بالتصميم", pub.summary_md("app-test", "success", "ok", [self.valid_leg()], 0))
+        self.assertEqual(sum(guard.scan_text(md).values()), 0)
+        d = sb.build_description("failure", "tests", {"tests": 3082, "failures": 11, "errors": 0}, 3)
+        self.assertIn("3 مستثناةً بالتصميم", d)
+        self.assertLessEqual(len(d), 140)
+        self.assertNotIn("مستثناةً", sb.build_description("failure", "tests", {"tests": 1, "failures": 0, "errors": 0}, 0))
+
+
 class ReadLegsTest(unittest.TestCase):
     def good_files(self, kind="app-test", leg_id="main"):
         return {"counts.json": json.dumps(counts(kind, leg_id)).encode(), "log.txt.gz.age": AGE}
@@ -429,6 +463,14 @@ class RunTest(unittest.TestCase):
             self.assertEqual(payload["target_url"], "https://github.com/mwqwf/mushafak-ci/actions/runs/42")
             self.assertEqual(up[0][0], "logs/42/1/app-test/main.log.txt.gz.age")
             self.assertEqual(sum(guard.scan_text(res["summary"]).values()), 0)
+
+    def test_success_status_description_states_the_excluded_count(self):
+        with tempfile.TemporaryDirectory() as d:
+            make_art(d, "main", ReadLegsTest().good_files())
+            res, sent, _ = self.go(self.env(d))
+            self.assertEqual(res["state"], "success")
+            self.assertIn("3 مستثناةً بالتصميم", sent[0][1]["description"])
+            self.assertIn("مستثنى بالتصميم", res["summary"])
 
     def test_planted_leak_in_build_log_fails_status(self):
         with tempfile.TemporaryDirectory() as d:
