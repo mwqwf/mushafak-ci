@@ -526,15 +526,15 @@ class SupervisorTest(unittest.TestCase):
         self.assertIn("لا وقتَ كافياً", self.log())
 
     def test_budget_starts_with_the_supervisor_and_phases_stop_five_minutes_before(self):
-        """أ4: الميزانيةُ (مهلةُ الشوط) تُحسب من بدء المشرف وتشمل كلَّ شيء؛ والأطوارُ تنتهي قبلها بخمس دقائق لـfinalize؛
+        """أ4: الميزانيةُ (مهلةُ الشوط) تُحسب من بدء المشرف وتشمل كلَّ شيء؛ والأطوارُ تنتهي قبلها بـFIN_RESERVE (365 ث منذ الإصلاح السادس) لـfinalize؛
         ووظيفةُ build في السير مهلتُها الميزانيةُ + هامش (job_timeout) فيسبق finalize إيقافَ GitHub."""
         self.write_kinds(tiny_kinds(["selftest_ok"], timeout=75))
         before = int(time.time())
         self.sup("prepare")
         dl = int(readf(os.path.join(self.pci, "state", "deadline")))
         be = int(readf(os.path.join(self.pci, "state", "budget_end")))
-        self.assertTrue(before + 70 * 60 - 5 <= dl <= int(time.time()) + 70 * 60 + 5, dl - before)
-        self.assertEqual(be - dl, 300)
+        self.assertTrue(before + 75 * 60 - 365 - 5 <= dl <= int(time.time()) + 75 * 60 - 365 + 5, dl - before)
+        self.assertEqual(be - dl, 365)
         wf = readf(os.path.join(HERE, "..", "..", ".github", "workflows", "private-ci.yml"))
         self.assertIn("timeout-minutes: ${{ matrix.leg.job_timeout }}", wf)
         import plan
@@ -948,7 +948,7 @@ class SupervisorTest(unittest.TestCase):
         self.run_all()
         out = self.outputs[-1][1].stdout
         self.assertRegex(out, r"(?m)^الإنهاء: التملّك \d+ ث من \d+ متاحة$")
-        self.assertRegex(out, r"(?m)^الإنهاء: \d+ ث من ميزانيةٍ أقصاها 300$")
+        self.assertRegex(out, r"(?m)^الإنهاء: \d+ ث من ميزانيةٍ أقصاها 365$")
         self.assertEqual(self.ready(), "ready=true")
 
     def test_fix5_finalize_budget_is_bounded_by_fin_reserve_in_the_source(self):
@@ -999,10 +999,13 @@ class SupervisorTest(unittest.TestCase):
         fn = body[body.index("emu_procs(){"):body.index("\n}\n", body.index("emu_procs(){")) + 3]
         me = os.getuid()
         lines = f"{me} adb\\n{me} qemu-system-x86\\n{me} emulator\\n{me + 1} adb\\n{me} bash"
-        r = subprocess.run(["bash", "-c", f"ISO=0\nps(){{ printf '{lines}\\n'; }}\n{fn}\nemu_procs"], capture_output=True, text=True)
+        tmo = 'tmo(){ "${@:2}"; }\n'     # الإصلاحُ السادس: ps تحت tmo — والبديلُ ينفّذ الأمرَ (الدالّةَ المزيَّفة) كما هو
+        r = subprocess.run(["bash", "-c", f"ISO=0\n{tmo}ps(){{ printf '{lines}\\n'; }}\n{fn}\nemu_procs"], capture_output=True, text=True)
         self.assertEqual(r.stdout.strip(), "1 2 1")
-        r = subprocess.run(["bash", "-c", f"ISO=0\nps(){{ return 1; }}\n{fn}\nemu_procs"], capture_output=True, text=True)
+        r = subprocess.run(["bash", "-c", f"ISO=0\n{tmo}ps(){{ return 1; }}\n{fn}\nemu_procs"], capture_output=True, text=True)
         self.assertEqual(r.stdout.strip(), "? ? 1")                                # تعذّرُ ps لا يُقرأ صفراً
+        r = subprocess.run(["bash", "-c", f"ISO=0\ntmo(){{ return 124; }}\n{fn}\nemu_procs"], capture_output=True, text=True)
+        self.assertEqual(r.stdout.strip(), "? ? 1")                                # وانقضاءُ مهلته كذلك
 
     def test_fix5_emu_probe_is_trusted_and_uses_adb_only_as_the_builder(self):
         """مسبارُ المحاكي طورٌ ثابتٌ في المشرف (لا من مصدرٍ خاصّ) · يُثبت الإيجابَ (≥1 بمستخدم البناء) والصفرَ الأجنبيّ · وdeny --exists ·
@@ -1031,6 +1034,103 @@ class SupervisorTest(unittest.TestCase):
         # ودرسُ 42283857840: ADB_SERVER_SOCKET بعنوانٍ رقميّ يجعل adb يرفض تشغيلَ خادمه («remote host») ⇒ المنفذُ وحده
         self.assertNotIn('"ADB_SERVER_SOCKET=', code)
         self.assertIn('chmod -R go-w,a+rX "$sdk/system-images" "$sdk/emulator" "$sdk/platform-tools"', si)
+
+    # ───── الإصلاحُ السادس (مراجعة Codex 15) ─────
+    def test_fix6_emu_probe_requires_in_device_control(self):
+        """الملاحظة 1: نجاحُ الضابط من داخل الجهاز شرطٌ في الحكم — لا أداة · مستمعٌ لم يُنصت · رفضُ reverse لمنفذه · انقضاءُ المهلة
+        ⇒ «العبورُ غيرُ مقيس ⇒ فشل»؛ ولا سطرَ «يُكتفى بإثبات الجهة المضيفة»؛ وفحصُ العبور باقٍ؛ والفحوصُ 19 في الحالة السليمة."""
+        body = readf(os.path.join(HERE, "supervise.sh"))
+        code = "\n".join(ln for ln in body.splitlines() if not ln.lstrip().startswith("#"))
+        ep = code[code.index("emu_probe(){"):code.index("run_runner_phase(){")]
+        self.assertIn("ctl_ok=0", ep.split("\n")[1])                         # يُهيَّأ في رأس الدالّة قبل أيّ حلقة
+        self.assertIn('ep [ "$ctl_ok" = 1 ]', ep)
+        self.assertIn('ep [ "$thru" = 0 ]', ep)
+        self.assertLess(ep.index('ep [ "$ctl_ok" = 1 ]'), ep.index('ep [ "$thru" = 0 ]'))
+        self.assertIn('pub "المحاكي: ⛔ ${ctl_why:-الضابطُ لم يصل} — العبورُ غيرُ مقيس ⇒ فشل"', ep)
+        for why in ("لا أداةَ اتّصالٍ داخل الجهاز وصلت بالضابط", "لم يُنصت مستمعُ الضابط",
+                    "رُفض تسجيلُ التحويل العكسيّ (reverse) لمنفذ الضابط", "انقضت مهلةُ الاتّصال بالضابط من داخل الجهاز",
+                    "انقضت مهلةُ تسجيل التحويل العكسيّ لمنفذ الضابط"):
+            self.assertIn(f'ctl_why="{why}', ep)
+        self.assertNotIn("يُكتفى بإثبات الجهة المضيفة", ep)
+        # العبورُ لا يُقاس إلا بعد ضابطٍ ناجح: علامةُ الوسيط تُقرأ داخل فرع ctl_ok=1 وحده
+        branch = ep[ep.index('if [ "$ctl_ok" = 1 ]; then'):ep.index('ep [ "$ctl_ok" = 1 ]')]
+        self.assertIn("thru=1", branch.split("\n  else\n")[0])
+        self.assertNotIn("thru=1", branch.split("\n  else\n")[1])
+        # عدُّ الفحوص في الحالة السليمة = 19 (كلُّ ep خارج فروع الفشل «ep false»، ودون تعريف ep نفسِه)
+        self.assertEqual(len(re.findall(r"(?<![\w-])ep (?!false)", ep)), 19)
+
+    def test_fix6_emu_probe_control_branches_by_execution(self):
+        """تنفيذاً: كتلةُ الضابط معزولةً ببدائلَ لـbadb وwait_file — كلُّ حالة فشلٍ تُطبع «غيرُ مقيس ⇒ فشل» وctl_ok=0، والنجاحُ ctl_ok=1."""
+        body = readf(os.path.join(HERE, "supervise.sh"))
+        blk = body[body.index('  ctl_why=""\n  as_builder setsid'):body.index('  ep [ "$ctl_ok" = 1 ]')]
+
+        def run(wait_ok, rev_rc, shell_rc, shell_out):
+            script = ("pub(){ printf '%s\\n' \"$*\"; }\nas_builder(){ return 0; }\n"
+                      f"wait_file(){{ return {0 if wait_ok else 1}; }}\n"
+                      f"badb(){{ case \"$2\" in reverse) return {rev_rc};; shell) printf '%s\\n' '{shell_out}'; return {shell_rc};; esac; }}\n"
+                      "BHOME=/x; broker=/y; secs=5; LISTENER=x; CONTROL_MARK=PCI-CONTROL-MARK; BROKER_MARK=PCI-BROKER-MARK\n"
+                      "ctl_ok=0; thru=0; tool=''\n" + blk + 'echo "ctl_ok=$ctl_ok thru=$thru"\n')
+            return subprocess.run(["bash", "-c", "set -uo pipefail\n" + script], capture_output=True, text=True).stdout
+        ok = run(True, 0, 0, "PCI-CONTROL-MARK")
+        self.assertIn("الضابطُ وصل ✅", ok)
+        self.assertIn("ctl_ok=1 thru=0", ok)
+        for label, args, why in (("no-tool", (True, 0, 127, "not found"), "لا أداةَ اتّصالٍ داخل الجهاز وصلت بالضابط"),
+                                 ("listener", (False, 0, 0, "PCI-CONTROL-MARK"), "لم يُنصت مستمعُ الضابط"),
+                                 ("reverse", (True, 1, 0, "PCI-CONTROL-MARK"), "رُفض تسجيلُ التحويل العكسيّ (reverse) لمنفذ الضابط"),
+                                 ("timeout", (True, 0, 124, ""), "انقضت مهلةُ الاتّصال بالضابط من داخل الجهاز")):
+            with self.subTest(label=label):
+                out = run(*args)
+                self.assertIn(f"المحاكي: ⛔ {why}", out)
+                self.assertIn("— العبورُ غيرُ مقيس ⇒ فشل", out)
+                self.assertIn("ctl_ok=0", out)
+
+    CLEAN_FUNCS = ("emu_procs(){", "tagged_pids(){", "builder_count(){", "kill_builder(){", "do_cleanup(){")
+
+    def test_fix6_cleanup_external_commands_are_all_under_a_deadline(self):
+        """ملاحظة finalize: كلُّ ps/pgrep/pkill/crontab/id/grep-على-/proc في دوالّ التنظيف وعدِّ العمليّات ملفوفٌ بـtmo أو rtmo؛
+        ولا انتظارَ بعدّ دوراتٍ (seq) بل بساعة الحائط؛ وأسوأُ الحالة من الثوابت ≤ FIN_CAP_CLEAN، والحجزُ يتّسع له وللتملّك وما بعده."""
+        body = readf(os.path.join(HERE, "supervise.sh"))
+        code = "\n".join(ln for ln in body.splitlines() if not ln.lstrip().startswith("#"))
+        self.assertIn('tmo(){ timeout -k "$FIN_CMD_KILL" "${1}s" "${@:2}"; }', code)
+        self.assertIn('sudo -n timeout -k "$FIN_CMD_KILL" "${1}s" "${@:2}"', code)
+        # foreign_emu_procs سطرٌ واحدٌ يستدعي emu_procs وحدها (لا أمرَ خارجيّ فيه)
+        self.assertIn('foreign_emu_procs(){ local a e f; read -r a e f <<<"$(emu_procs)"; echo "$f"; }', code)
+        for name in self.CLEAN_FUNCS:
+            i = code.index("\n" + name) + 1
+            fn = code[i:code.index("\n}\n", i) + 3]
+            with self.subTest(fn=name):
+                hits = list(re.finditer(r"(?<![\w-])(ps|pgrep|pkill|crontab|id -u pcibuild|grep -lsaF)(?![\w-])", fn))
+                for m in hits:
+                    pre = fn[max(0, m.start() - 20):m.start()]
+                    self.assertRegex(pre, r'r?tmo "\$FIN_CMD" $', f"{name}: {m.group(0)} بلا مهلة")
+                self.assertNotIn("seq ", fn)
+                self.assertNotIn("sudo -n", fn)                               # sudo هنا لا يكون إلا داخل rtmo
+        self.assertIn('rtmo "$FIN_CMD" pkill', code)                     # الفحصُ أعلاه ليس فارغاً: pkill موجودٌ وملفوف
+        val = lambda name: int(re.search(rf"\b{name}=(\d+)", body).group(1))   # noqa: E731
+        P = val("FIN_CMD") + val("FIN_CMD_KILL")
+        R = P + val("FIN_CMD_KILL")
+        worst = 2 * P + R + 3 * (R + val("FIN_WAIT") + P)              # foreign_emu_procs + crontab + 3 جولات
+        self.assertLessEqual(worst, val("FIN_CAP_CLEAN"))
+        after = val("FIN_CAP_COUNTS") + val("FIN_CAP_GUARD") + val("FIN_CAP_ENC") + val("FIN_CAP_CHECK") + 4 * val("FIN_KILL")
+        self.assertLessEqual(val("FIN_CAP_CLEAN") + val("FIN_OWN_MIN") + val("FIN_KILL") + after, val("FIN_RESERVE"))
+        # وخطوةُ finalize في السير لها موعدٌ خارجيّ يغطّي FIN_RESERVE وهامشاً؛ وخطوتا الأطوار مهلتُهما الميزانيةُ كلُّها
+        wf = readf(os.path.join(HERE, "..", "..", ".github", "workflows", "private-ci.yml"))
+        fin = wf[wf.index("- name: العدّ والتشفير والفحص"):wf.index("- name: رفع الناتج")]
+        mins = int(re.search(r"timeout-minutes: (\d+)", fin).group(1))
+        self.assertGreater(mins * 60, val("FIN_RESERVE") + 60)
+        for step in ("- name: البناء والاختبار", "- name: المحاكي بمستخدم البناء"):
+            blk = wf[wf.index(step):wf.index("- name:", wf.index(step) + 5)]
+            self.assertIn("timeout-minutes: ${{ matrix.leg.timeout }}", blk)
+
+    def test_fix6_builder_count_fails_closed_on_timeout(self):
+        """انقضاءُ مهلة pgrep (124) لا يُقرأ صفراً: builder_count ⇒ «?» فيبقى التنظيفُ فاشلاً ولا تُقرأ الشجرة."""
+        body = readf(os.path.join(HERE, "supervise.sh"))
+        fn = body[body.index("builder_count(){"):body.index("\n}\n", body.index("builder_count(){")) + 3]
+        for rc, out, want in ((124, "", "?"), (137, "", "?"), (1, "", "0"), (0, "11\\n12", "2"), (2, "", "?")):
+            with self.subTest(rc=rc):
+                script = f"ISO=1; FIN_CMD=3\ntmo(){{ printf '{out}'; return {rc}; }}\n{fn}\nbuilder_count"
+                r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+                self.assertEqual(r.stdout.strip(), want)
 
 class IsoProbeTest(unittest.TestCase):
     """أ2: مسبارُ المقابس — الجردُ يلتقط مقابسَ الحساب ومجموعاته (لا مجموعات البناء)، والاتّصالُ يُعدّ ولا يطبع اسماً."""

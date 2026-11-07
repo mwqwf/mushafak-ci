@@ -463,12 +463,29 @@ class RunTest(unittest.TestCase):
         make_art(d, "main", {"counts.json": json.dumps(c).encode(), "log.txt.gz.age": AGE})
         return self.env(d, PCI_KIND="dry-run", PCI_STATUS_TOKEN="", **kw)
 
-    def test_dry_run_sends_nothing_and_uses_dryrun_prefix(self):
+    def test_fix6_dry_run_with_creds_present_never_calls_the_uploader(self):
+        """الإصلاحُ السادس (Codex 15 · الملاحظة 3): جافّةٌ + بيانةٌ صالحةٌ موجودة ⇒ لا استدعاءَ للرافع ولا حالة · skipped وتحذيرٌ صريح
+        · ولا تُعدّ اشتباهاً. (كان السلوكُ السابق يرفع إلى dryrun/ متى وُجدت البيانة.)"""
+        import contextlib
+        import io
         with tempfile.TemporaryDirectory() as d:
-            res, sent, up = self.go(self.dry_env(d))
-            self.assertEqual(res["state"], "success")
-            self.assertEqual(sent, [])
-            self.assertTrue(up[0][0].startswith("dryrun/42/1/dry-run/"))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                res, sent, up = self.go(self.dry_env(d))
+            out = buf.getvalue()
+            self.assertEqual((res["state"], res["reason"], res["upload"], res["suspicious"]), ("success", "ok", "skipped", False))
+            self.assertEqual((sent, up), ([], []))
+            self.assertIn("الرفع: ⚠ بيانة R2 وصلت إلى تجربةٍ جافّة — أُهملت", out)
+            self.assertIn("الرفع: تجربةٌ جافّة — لا رفعَ ولا أثرَ خارجيّ", out)
+            self.assertNotIn("✅", out.split("الرفع: تجربةٌ جافّة")[1].split("\n")[0])
+        for kind in ("dry-run-emu", "dry-run-stress"):
+            if kind not in KINDS:
+                continue
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as d:
+                leg = KINDS[kind]["legs"][0]["id"]
+                make_art(d, leg, {"counts.json": json.dumps(counts(kind, leg)).encode(), "log.txt.gz.age": AGE})
+                res, sent, up = self.go(self.env(d, PCI_KIND=kind, PCI_STATUS_TOKEN=""))
+                self.assertEqual((res["upload"], sent, up), ("skipped", [], []))
 
     def test_dry_run_green_without_any_secret(self):
         """D20-ج: بلا بيانة R2 ولا رمز حالة: الرفعُ skipped ويُقبل في الحكم؛ ولا حالةَ تُرسل ولا رفع."""
@@ -481,12 +498,22 @@ class RunTest(unittest.TestCase):
             env["PCI_R2_JSON"] = ""
             self.assertEqual(self.go(env)[0]["state"], "success")
 
-    def test_dry_run_with_bad_creds_is_not_skipped(self):
-        """بيانةٌ موجودةٌ لكنّها مرفوضةٌ ليست «غيابَها»: تعذّرٌ لا تخطٍّ."""
+    def test_dry_run_with_bad_creds_is_ignored_not_read(self):
+        """الإصلاحُ السادس: في الجافّة لا تُقرأ البيانةُ أصلاً (صالحةً أو مرفوضة) ⇒ لا رفعَ ولا أثر · skipped."""
         with tempfile.TemporaryDirectory() as d:
-            res, _, up = self.go(self.dry_env(d, PCI_R2_JSON="{not json"))
-            self.assertEqual((res["state"], res["reason"], res["upload"]), ("error", "upload", "failed"))
-            self.assertEqual(up, [])
+            res, sent, up = self.go(self.dry_env(d, PCI_R2_JSON="{not json"))
+            self.assertEqual((res["state"], res["reason"], res["upload"]), ("success", "ok", "skipped"))
+            self.assertEqual((sent, up), ([], []))
+
+    def test_private_source_still_uploads_under_private_prefix(self):
+        """سلوكُ المصدر الخاصّ كما هو: يُرفع كلُّ شوطٍ صالحٍ إلى logs/ وبيانةٌ مرفوضةٌ تعذّر."""
+        with tempfile.TemporaryDirectory() as d:
+            make_art(d, "main", ReadLegsTest().good_files())
+            res, _, up = self.go(self.env(d))
+            self.assertEqual((res["upload"], len(up)), ("verified", 1))
+            self.assertTrue(up[0][0].startswith("logs/42/1/app-test/"))
+            res, _, up = self.go(self.env(d, PCI_R2_JSON="{not json"))
+            self.assertEqual((res["state"], res["reason"], res["upload"], up), ("error", "upload", "failed", []))
 
     def test_dry_run_failures_still_fail_without_secrets(self):
         with tempfile.TemporaryDirectory() as d:
