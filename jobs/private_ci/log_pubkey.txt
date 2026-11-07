@@ -1,3 +1,4 @@
 # المفتاحُ العامّ لتشفير سجلّات private-ci (age · X25519). ليس سرّاً: يُنشر هنا عمداً.
-# مفتاحٌ إنتاجيّ وُلِّد 2026-11-07 على حاسوب المالك؛ مفتاحُه الخاصّ في سرّ PCI_LOG_AGE_KEY ببيئة log-read في QuranRafiq وحدها (على main).
-age19sfp0cw5p6n9qwcmdnht2psh0sxcw2v8w96yekhcvwk0h5n5l4zqra9jpv
+# مفتاحٌ إنتاجيّ وُلِّد 2026-11-07 12:02Z على حاسوب المالك (الزوجُ الثاني؛ الأوّل age19sfp… مُحي خاصُّه حين أُعيد السكربت فلم يعد يُفكّ به شيء).
+# خاصُّه في سرّ PCI_LOG_AGE_KEY ببيئة log-read في QuranRafiq وحدها (على main)؛ ويُتحقَّق من تطابقهما بسير ci-secrets-verify.yml.
+age1ymvjxu02p9svklz3m9940lt0qaf8kdj8mux6drn3q8uvpr2alvts830qcn
