@@ -1,0 +1,26 @@
+{
+ "_comment": "قائمةُ الاستثناءات على مستوى الدالّة، يملكها العدّاء العامّ لا الشجرةُ الخاصّة: اختباراتٌ تقرأ مساراً محرَّماً بالتصميم (FORBIDDEN_RX في clone.sh) لا يُستنسخ أبداً إلى هذا العدّاء، فلا يصحّ أن تُحسب إخفاقاً فيه. تُطبَّق بسكربت تهيئة Gradle (forbidden_excludes.init.gradle) على مهامّ Test بـfilter.excludeTestsMatching، ولا يُمسّ الاختبارُ نفسُه ولا سلوكُ app-test في CI الخاصّ (تبقى تعمل هناك كما هي). والحارسُ (forbidden_excludes.py) يرفض استثناءَ أيّ دالّةٍ ما لم يوجد صنفُها ودالّتُها في الاستنساخ ويذكر ملفُّها حرفاً مساراً محرَّماً مطابقاً لـFORBIDDEN_RX. كلُّ عنصر: kind (نوعُ المهمّة) · class (الاسمُ الكامل) · method (اسمُ الدالّة كما في JVM) · forbidden_path (المسارُ المحرَّم الذي يذكره ملفُّ الاختبار) · reason. ⛔ لا مطابقةَ بنجمة ولا استثناءَ صنفٍ كاملاً: دالّةٌ واحدةٌ لكلّ عنصر.",
+ "excludes": [
+  {
+   "kind": "app-test",
+   "class": "com.ali.rafiq.monetization.AdUnitIdsTest",
+   "method": "app-ads txt يحمل ناشر التطبيق",
+   "forbidden_path": "store/site/app-ads.txt",
+   "reason": "يقرأ ملفَّ الموقع store/site/app-ads.txt وstore/ محرَّمٌ استنساخُه بالتصميم"
+  },
+  {
+   "kind": "app-test",
+   "class": "com.ali.rafiq.ui.AyahLinkTest",
+   "method": "بصمات assetlinks موجودة وملف الموقع يقدّم الصفحة الاحتياطية",
+   "forbidden_path": "store/site",
+   "reason": "يشترط وجودَ مجلّد الموقع store/site وstore/ محرَّمٌ استنساخُه بالتصميم"
+  },
+  {
+   "kind": "app-test",
+   "class": "com.ali.rafiq.ui.tasmi.WhisperHallucinationLexiconTest",
+   "method": "القائمتان في المحرّك والخادم حرفاً واحدة",
+   "forbidden_path": "cloud/worker/src/audio.ts",
+   "reason": "يقارن قائمةَ المحرّك بمصدر الخادم cloud/worker/src/audio.ts وcloud/ محرَّمٌ استنساخُه بالتصميم"
+  }
+ ]
+}

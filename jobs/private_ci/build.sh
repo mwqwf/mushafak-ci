@@ -152,9 +152,24 @@ emu_phase(){ # طورُ «emu» في الأنواع ذات المحاكي الو
   esac
 }
 
+# 🚧 الاستثناءاتُ بالتصميم (app-test وحده): الحارسُ وسكربتُ تهيئة Gradle والقائمةُ من مدخل التحكّم (يملكه root) لا من الشجرة الخاصّة.
+#    ⛔ لا @Ignore ولا assume ولا تغييرَ في الاختبارات: يستثني Gradle دوالَّ بأعيانها أجازها الحارسُ بعد أن ثبت أنّها تقرأ مساراً محرَّماً.
+CTL_SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EXCLUDES_OUT="$PCI_BSTATE/forbidden_excludes.txt"
+forbidden_excludes(){
+  rm -f "$EXCLUDES_OUT"
+  python3 -I -S "$CTL_SELF/forbidden_excludes.py" verify --src "$PCI_SRC" --kind "$PCI_KIND" --out "$EXCLUDES_OUT"
+}
+gradle_app_test(){
+  # بلا ملفّ أنماطٍ أجازه الحارسُ لا يجري Gradle أصلاً (ولا يُعاد الفحصُ بصمتٍ هنا: طورُ forbidden_excludes سبق وفشلُه يُسقط الشوط)
+  [ -f "$EXCLUDES_OUT" ] || { say "⛔ لا ملفَّ استثناءاتٍ أجازه الحارس — لا يجري Gradle"; return 1; }
+  gradle --init-script "$CTL_SELF/forbidden_excludes.init.gradle" "-Dpci.test.excludes=$EXCLUDES_OUT" \
+    :app:compileDebugKotlin :app:testDebugUnitTest :core:quran:testDebugUnitTest :core:learning:test
+}
+
 gradle_phase(){
   case "$PCI_KIND" in
-    app-test)            gradle :app:compileDebugKotlin :app:testDebugUnitTest :core:quran:testDebugUnitTest :core:learning:test ;;
+    app-test)            gradle_app_test ;;
     engine-test)         gradle :engine:recitation:test ;;
     hudhud-feature-test) gradle :app:bundleRelease :app:bundleDebug ;;
     device-matrix)       gradle :app:assembleDebug :app:assembleDebugAndroidTest -Prafiq.testAbis=x86 ;;
@@ -171,6 +186,7 @@ run_phase(){
     back_handling)    python3 tools/ux/test_back_handling.py ;;
     i18n_verify)      python3 tools/i18n/verify.py ;;
     i18n_locale)      python3 tools/i18n/check_locale.py --all ;;
+    forbidden_excludes) forbidden_excludes ;;
     gradle)           gradle_phase ;;
     pip)              python3 -m pip install --disable-pip-version-check --no-input -q "numpy==2.1.3" "soundfile==0.13.1" ;;
     fixture_selftest) python3 tools/tasmi_bench/fixture_audit.py --selftest ;;

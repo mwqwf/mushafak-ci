@@ -37,7 +37,8 @@ BUILD_SET=(/gradlew /gradle/ /settings.gradle.kts /build.gradle.kts /gradle.prop
 sparse_for_kind(){
   case "$PCI_KIND" in
     dry-run|dry-run-emu|dry-run-stress) printf '%s\n' /jobs/private_ci/ ;;
-    app-test)                    printf '%s\n' "${BUILD_SET[@]}" /tools/ai/ /tools/ux/ /tools/i18n/ /docs/ai/app_guide/ ;;
+    # /tools/quraat/out/ — خرائطُ الروايات ونصوصُها (قرآنٌ منشورٌ لا أسرار) تقرؤها اختباراتُ الوحدة (mapping_warsh.json) — مقيسٌ في تشغيلة 42391117587
+    app-test)                    printf '%s\n' "${BUILD_SET[@]}" /tools/ai/ /tools/ux/ /tools/i18n/ /tools/quraat/out/ /docs/ai/app_guide/ ;;
     engine-test)                 printf '%s\n' "${BUILD_SET[@]}" /tools/tasmi_bench/ /tools/tasmi_phoneme/ /tools/ci/ ;;
     tasmi-model-emulator-smoke)  printf '%s\n' "${BUILD_SET[@]}" /tools/ci/ ;;
     ui-shots-emu)                printf '%s\n' "${BUILD_SET[@]}" /tools/ci/ /ops/ui_shots/request.txt ;;
