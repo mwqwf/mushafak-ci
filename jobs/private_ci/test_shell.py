@@ -1058,6 +1058,11 @@ class SupervisorTest(unittest.TestCase):
         self.assertNotIn("thru=1", branch.split("\n  else\n")[1])
         # عدُّ الفحوص في الحالة السليمة = 19 (كلُّ ep خارج فروع الفشل «ep false»، ودون تعريف ep نفسِه)
         self.assertEqual(len(re.findall(r"(?<![\w-])ep (?!false)", ep)), 19)
+        # السادس-ب (التشغيلة 42352694677): يُنتظر خروجُ المحاكي قبل kill-server، ويُعاد kill-server ما بقي adb — والحكمُ نفسُه
+        stop = ep[ep.index("badb 60 emu kill"):ep.index('pub "المحاكي: بعد الإيقاف — adb')]
+        self.assertLess(stop.index('[ "$e" = 0 ] && break'), stop.index("adb kill-server"))
+        self.assertIn('[ $((t % 5)) = 0 ] && as_builder timeout 10 adb kill-server', stop)
+        self.assertIn('ep [ "$a" = 0 ]; ep [ "$e" = 0 ]; ep [ "$f" = 0 ]', ep)
 
     def test_fix6_emu_probe_control_branches_by_execution(self):
         """تنفيذاً: كتلةُ الضابط معزولةً ببدائلَ لـbadb وwait_file — كلُّ حالة فشلٍ تُطبع «غيرُ مقيس ⇒ فشل» وctl_ok=0، والنجاحُ ctl_ok=1."""
