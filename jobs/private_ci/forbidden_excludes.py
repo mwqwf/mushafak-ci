@@ -12,7 +12,7 @@
   ١. الصنفُ موجودٌ بالضبط مرّةً في الاستنساخ: ملفٌّ باسمه (.kt/.java) تحت src/test في مجلّداتٍ تطابق حزمتَه، فيه سطرُ package وclass.
   ٢. الدالّةُ موجودةٌ في ذلك الملفّ (fun `الاسم` أو fun الاسم()).
   ٣. المسارُ المحرَّم المعلَن يطابق FORBIDDEN_RX، **ويذكره جسمُ الدالّة المستثناة نفسِها حرفاً في نصٍّ بين علامتَي تنصيص** (معادلٌ له
-     أو أصلٌ لمسارٍ فيه) — لا الملفُّ ولا دالّةٌ مجاورة ولا حقلٌ على مستوى الصنف ولا تعليق. الجسمُ: من سطر إعلان الدالّة حتى ما قبل
+     أو أصلٌ لمسارٍ فيه) — لا الملفُّ ولا دالّةٌ مجاورة ولا حقلٌ على مستوى الصنف ولا تعليقٌ (`//` أو `/* */` يُنزعان من الجسم أوّلاً). الجسمُ: من سطر إعلان الدالّة حتى ما قبل
      أوّل سطرٍ تالٍ يبدأ بـ@Test أو بإعلان fun، أو نهايةِ الملفّ.
   ٤. المسارُ المعلَن **غائبٌ فعلاً** من الاستنساخ (os.path.lexists) — وإن وُجد فالاختبارُ يجب أن يجري لا أن يُستثنى.
   ⛔ لا مطابقةَ بنجمة ولا استثناءَ صنفٍ كاملاً ولا رابطاً رمزيّاً ولا ملفّاً غيرَ عاديّ؛ ولا يُغيَّر الاختبارُ نفسُه.
@@ -104,6 +104,46 @@ def find_class_file(src, fqcn):
     return hits[0]
 
 
+def strip_comments(text):
+    """ينزع تعليقاتِ `//` (حتى نهاية السطر) و`/* … */` (متداخلةً كما في كوتلن) ويحفظ ما داخل علامتَي التنصيص ومحرفَ '"'. يمرّ على المحارف
+    ويعرف أنّه داخل نصّ؛ ونصٌّ مثلُ "a//b" يبقى كاملاً. (ومن قطع النزعُ نصّاً فهذا أشدّ لا أرخى.)"""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if text.startswith('"""', i):                       # نصٌّ خام: حتى الإغلاق
+            j = text.find('"""', i + 3)
+            j = n if j < 0 else j + 3
+            out.append(text[i:j]); i = j
+        elif c == '"':                                      # نصٌّ عاديّ بهروب
+            j = i + 1
+            while j < n and text[j] != '"' and text[j] != "\n":
+                j += 2 if text[j] == "\\" else 1
+            j = min(j + 1, n)
+            out.append(text[i:j]); i = j
+        elif c == "'":                                      # محرفٌ مفرد ('"' مثلاً)
+            m = re.match(r"'(?:\\.|[^'\\\n])'", text[i:])
+            if m:
+                out.append(m.group(0)); i += len(m.group(0))
+            else:
+                out.append(c); i += 1
+        elif text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j                           # يُبقي السطرَ الجديد
+        elif text.startswith("/*", i):
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if text.startswith("/*", j):
+                    depth += 1; j += 2
+                elif text.startswith("*/", j):
+                    depth -= 1; j += 2
+                else:
+                    j += 1
+            out.append(" " + "\n" * text.count("\n", i, j)); i = j
+        else:
+            out.append(c); i += 1
+    return "".join(out)
+
+
 def normalized_literals(text):
     out = []
     for m in LITERAL_RX.finditer(text):
@@ -147,7 +187,7 @@ def check_entry(src, e, absent=True):
     if body is None:
         raise Refusal("دالّةٌ غيرُ موجودةٍ في ملفّ الصنف")
     ok = False
-    for lit in normalized_literals(body):
+    for lit in normalized_literals(strip_comments(body)):
         if (lit == path or lit.startswith(path + "/")) and FORBIDDEN_RX.search(lit):
             ok = True
             break
@@ -160,8 +200,8 @@ def pattern_of(e):
 
 
 def verify(src, kind, entries, absent=True):
-    """absent=False للاختبار وحده (شجرةُ الخاصّ الكاملة يوجد فيها المحرَّم أصلاً)؛ والحارسُ في CI يمرّ بـTrue دائماً."""
-    """(الأنماط، أسطرُ التقرير). يرفع Refusal عند أوّل عنصرٍ لا يثبت (بسببه واسمِه)."""
+    """(الأنماط، أسطرُ التقرير). يرفع Refusal عند أوّل عنصرٍ لا يثبت (بسببه واسمِه).
+    absent=False للاختبار وحده (شجرةُ الخاصّ الكاملة يوجد فيها المحرَّم أصلاً)؛ والحارسُ في CI يمرّ بـTrue دائماً."""
     mine = [e for e in entries if e["kind"] == kind]
     patterns, lines = [], []
     for e in mine:

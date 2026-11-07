@@ -194,6 +194,24 @@ class VerifyTest(unittest.TestCase):
         pats, _ = fe.verify(self.src, "app-test", self.entries)
         self.assertEqual(len(pats), 3)
 
+    def test_negative_forbidden_only_in_a_comment_inside_the_listed_body(self):
+        fq = "com.ali.rafiq.ui.AyahLinkTest"
+        for name, body in (("line", 'val x = 1 // File("store/site")'),
+                           ("line-own", '// File("store/site")\n        val x = 1'),
+                           ("block", '/* File("store/site") */ val x = 1'),
+                           ("block-multi", '/*\n         * "store/site"\n         */\n        val x = 1'),
+                           ("block-nested", '/* a /* "store/site" */ "store/site" */ val x = 1')):
+            with self.subTest(name):
+                put(self.src, class_rel(fq), kt(fq, SOURCES[fq][0], body))
+                with self.assertRaises(fe.Refusal):
+                    fe.verify(self.src, "app-test", self.entries)
+
+    def test_positive_string_with_slashes_and_comment_markers_survives_stripping(self):
+        fq = "com.ali.rafiq.ui.AyahLinkTest"
+        put(self.src, class_rel(fq), kt(fq, SOURCES[fq][0], 'val a = "x" // تعليق\n        val s = File("store/site") /* c */'))
+        self.assertEqual(len(fe.verify(self.src, "app-test", self.entries)[0]), 3)
+        self.assertEqual(fe.strip_comments('a "u//v" /* "z" */ \'"\' b // "t"'), 'a "u//v"   \'"\' b ')
+
     def test_negative_declared_forbidden_path_exists_in_clone(self):
         for rel, kind in (("store/site/app-ads.txt", "file"), ("store/site", "dir"), ("cloud/worker/src/audio.ts", "file")):
             with self.subTest(rel=rel):
