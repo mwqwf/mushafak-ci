@@ -531,9 +531,14 @@ emu_probe(){ # $1 الثواني
   pub "المحاكي: أثناء التشغيل — $SOCK_PUB"
   ep [ "$t" = 0 ]
   # ثمّ يُقتل المحاكي وخادمُ ADB (بمستخدم البناء) ويُعاد العدُّ والجرد
+  # الإصلاحُ السادس-ب (التشغيلة 42352694677: «adb بمستخدم البناء 1» بعد 60 ث ⇒ الفحص 16): المحاكي حين يُغلق قد يُحيي خادمَ ADB
+  #   بعد kill-server (سباق). فيُنتظر خروجُ المحاكي أوّلاً، ثمّ kill-server، ويُعاد kill-server كلَّ 5 ث ما بقي adb لمستخدم البناء.
+  #   (بمستخدم البناء وحده كسائر المسبار؛ والحكمُ يبقى: أيُّ adb باقٍ بعد 60 ث ⇒ فشل.)
   badb 60 emu kill >/dev/null 2>&1
+  for t in $(seq 1 60); do read -r a e f <<<"$(emu_procs)"; [ "$e" = 0 ] && break; sleep 1; done
   as_builder timeout 30 adb kill-server >/dev/null 2>&1
-  for t in $(seq 1 60); do read -r a e f <<<"$(emu_procs)"; [ "$a" = 0 ] && [ "$e" = 0 ] && break; sleep 1; done
+  for t in $(seq 1 60); do read -r a e f <<<"$(emu_procs)"; [ "$a" = 0 ] && [ "$e" = 0 ] && break
+    [ $((t % 5)) = 0 ] && as_builder timeout 10 adb kill-server >/dev/null 2>&1; sleep 1; done
   read -r a e f <<<"$(emu_procs)"
   pub "المحاكي: بعد الإيقاف — adb بمستخدم البناء $a · المحاكي/qemu بمستخدم البناء $e · بحسابٍ آخر $f"
   ep [ "$a" = 0 ]; ep [ "$e" = 0 ]; ep [ "$f" = 0 ]
