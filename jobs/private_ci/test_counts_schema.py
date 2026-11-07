@@ -16,7 +16,7 @@ import counts_schema as cs  # noqa: E402
 
 SHA = "d" * 40
 KINDS = cs.load_kinds()
-APP_RAN = ["isolation", "clone", "sdk_pkgs", "app_guide", "no_blocking", "back_handling", "i18n_verify", "i18n_locale", "gradle"]
+APP_RAN = ["isolation", "clone", "sdk_pkgs", "app_guide", "no_blocking", "back_handling", "i18n_verify", "i18n_locale", "forbidden_excludes", "gradle"]
 
 
 def good(**kw):
@@ -204,7 +204,7 @@ class KindsTest(unittest.TestCase):
 
     def test_known_orderings_match_v2(self):
         order = {k: [p["id"] for p in v["phases"]] for k, v in KINDS.items()}
-        self.assertEqual(order["app-test"], ["sdk_pkgs", "app_guide", "no_blocking", "back_handling", "i18n_verify", "i18n_locale", "gradle"])
+        self.assertEqual(order["app-test"], ["sdk_pkgs", "app_guide", "no_blocking", "back_handling", "i18n_verify", "i18n_locale", "forbidden_excludes", "gradle"])
         self.assertEqual(order["tasmi-model-emulator-smoke"], ["sysimg", "sdk_pkgs", "whisper", "fatiha", "disk", "kvm", "emu_up", "emu"])
         self.assertEqual(order["device-matrix"], ["sysimg", "sdk_pkgs", "whisper", "fatiha", "gradle", "lint", "disk", "kvm", "emu_up",
                                                   "emu_smoke", "emu_tasmi"])

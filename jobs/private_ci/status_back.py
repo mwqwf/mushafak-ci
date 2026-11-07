@@ -36,19 +36,23 @@ REASONS = {
 }
 
 
-def build_description(state, reason, totals):
+def build_description(state, reason, totals, excluded=0):
+    """excluded: عددُ الدوالّ المستثناةِ بالتصميم (تقرأ مساراً محرَّماً لا يُستنسخ) — رقمٌ فقط، يُذكر إن كان موجباً."""
     if state not in FINAL_STATES or reason not in REASONS:
         raise ValueError("حالةٌ أو سببٌ غيرُ مسموح")
     d = WORDS[state]
     if totals:
         t, f, e = (int(totals.get(k, 0)) for k in ("tests", "failures", "errors"))
         d += f" · {t} اختباراً · إخفاق {f} · عطب {e}"
+        x = int(excluded or 0)
+        if x > 0:
+            d += f" · {x} مستثناةً بالتصميم"
     if REASONS[reason]:
         d += " · " + REASONS[reason]
     return d[:140]
 
 
-def build_payload(state, kind, reason, totals, run_url):
+def build_payload(state, kind, reason, totals, run_url, excluded=0):
     if state not in FINAL_STATES:
         raise ValueError("حالةٌ غيرُ مسموحة")
     context = f"public-ci/{kind}"
@@ -56,7 +60,7 @@ def build_payload(state, kind, reason, totals, run_url):
         raise ValueError("سياقٌ غيرُ مسموح")
     if not RUN_URL_RE.fullmatch(run_url or ""):
         raise ValueError("رابطٌ غيرُ مسموح")
-    return {"state": state, "context": context, "description": build_description(state, reason, totals),
+    return {"state": state, "context": context, "description": build_description(state, reason, totals, excluded),
             "target_url": run_url}
 
 

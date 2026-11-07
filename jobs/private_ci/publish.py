@@ -31,6 +31,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import artifact_check  # noqa: E402
 import counts_schema  # noqa: E402
+import forbidden_excludes  # noqa: E402
 import guard  # noqa: E402
 import status_back  # noqa: E402
 import upload_r2  # noqa: E402
@@ -78,6 +79,23 @@ def totals(legs):
             for k in t:
                 t[k] += leg["counts"][k]
     return t
+
+
+def excluded_count(kind, legs, listing=None):
+    """عددُ الدوالّ المستثناةِ بالتصميم (تقرأ مساراً محرَّماً لا يُستنسخ) للنوع — **يُذكر فقط إن ثبت أنّ حارسها نجح**:
+    كلُّ شوطٍ صالحٍ مرّ بطور forbidden_excludes ولم يفشل فيه (فلم يجرِ Gradle إلا بأنماطٍ تحقّق منها الحارس). وإلا 0.
+    القائمةُ من هذا المستودع عند github.sha (موثوقةٌ) لا من ناتج build."""
+    valid = [leg for leg in legs if leg.get("schema_ok")]
+    if not valid:
+        return 0
+    for leg in valid:
+        c = leg["counts"]
+        if "forbidden_excludes" not in c["ran"] or "forbidden_excludes" in (c.get("failed_phase_ids") or []):
+            return 0
+    try:
+        return len(forbidden_excludes.entries_for(kind, listing))
+    except (forbidden_excludes.Refusal, OSError, ValueError):
+        return 0
 
 
 # ───── الناتج ─────
@@ -206,7 +224,7 @@ def guard_texts(texts):
 
 
 # ───── الملخّص من الأرقام وحدها ─────
-def summary_md(kind, state, reason, legs):
+def summary_md(kind, state, reason, legs, excluded=0):
     icon = {"success": "✅", "failure": "⛔", "error": "⚠️"}[state]
     lines = [f"### 🔒 private-ci · {kind}", "",
              f"**الحكم:** {icon} {status_back.WORDS[state]}" + (f" · {status_back.REASONS[reason]}"
@@ -220,6 +238,8 @@ def summary_md(kind, state, reason, legs):
                          f"{c['failed_phases']} من {c['phases']} | {'✅' if c['ok'] else '⛔'} |")
         else:
             lines.append(f"| {leg['id']} | — | — | — | — | — | {'غائب' if not leg['present'] else 'مرفوض'} |")
+    if excluded > 0:
+        lines += ["", f"**مستثنى بالتصميم:** {excluded} دالّةً تقرأ مساراً محرَّماً لا يُستنسخ إلى العدّاء (تعمل في app-test الخاصّ كما هي)."]
     lines += ["", "السجلُّ الكامل مشفَّرٌ في R2 الخاصّ؛ ويُقرأ من المستودع الخاصّ بسير ci-log-fetch (رقمُ هذه التشغيلة)."]
     return "\n".join(lines) + "\n"
 
@@ -285,20 +305,21 @@ def run(env, kinds=None, fetch_logs=fetch_build_logs, uploader=upload_r2.upload_
     state, reason = compose(plan_ok, legs, guard_state, upload_state, dry=dry)
 
     # الملخّص: من الأرقام وحدها، ويمرّ على الحارس قبل نشره
-    md = summary_md(kind, state, reason, legs) if plan_ok else PLAN_SUMMARY
+    excluded = excluded_count(kind, legs) if plan_ok else 0
+    md = summary_md(kind, state, reason, legs, excluded) if plan_ok else PLAN_SUMMARY
     if sum(guard.scan_text(md).values()):
         md, state, reason, guard_state = BLOCKED_SUMMARY, "failure", "guard", "suspicious"
     t = totals(legs)
     for leg in legs:
         print(f"الشوط {leg['id']}: {'صالح' if leg['schema_ok'] else 'غيرُ صالح'}")
     print(f"الحكم: {state} · السبب {reason} · الحارس {guard_state} · الرفع {upload_state} · "
-          f"{t['tests']} اختباراً · إخفاق {t['failures']} · عطب {t['errors']}")
+          f"{t['tests']} اختباراً · إخفاق {t['failures']} · عطب {t['errors']}" + (f" · مستثنى بالتصميم {excluded}" if excluded else ""))
 
     status_code = None
     if not dry and kind_ok and sha_ok:
         run_url = f"https://github.com/{repo}/actions/runs/{int(run_id)}"
         try:
-            payload = status_back.build_payload(state, kind, reason, t if plan_ok else None, run_url)
+            payload = status_back.build_payload(state, kind, reason, t if plan_ok else None, run_url, excluded)
             status_code = sender(sha, payload, env.get("PCI_STATUS_TOKEN", ""))
         except ValueError:
             status_code = 0

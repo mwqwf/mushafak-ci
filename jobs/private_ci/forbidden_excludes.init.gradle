@@ -1,0 +1,28 @@
+// 🚧 سكربتُ تهيئة Gradle يملكه العدّاء العامّ (يُمرَّر بـ--init-script من مدخل التحكّم لا من الشجرة الخاصّة).
+// يستثني من كلّ مهمّة Test دوالَّ بأعيانها (الصنف.الدالّة) سبق أن أجازها forbidden_excludes.py بعد أن ثبت أنّها تقرأ
+// مساراً محرَّماً بالتصميم لا يُستنسخ إلى العدّاء. الأنماطُ تصل في ملفٍّ (‎-Dpci.test.excludes=<ملف>) يكتبه الحارسُ في طورٍ سابق.
+// ⛔ لا @Ignore ولا assume ولا تعديلَ في الاختبارات: الاستثناءُ هنا وحده، والاختباراتُ تعمل في app-test الخاصّ كما هي.
+// ⛔ بلا نجمةٍ: كلُّ سطرٍ اسمٌ كاملٌ لدالّةٍ واحدة (يرفض الحارسُ ما غيرَ ذلك قبل أن يصل إلى هنا؛ ويُعاد الفحصُ هنا دفاعاً).
+def excludesPath = System.getProperty('pci.test.excludes')
+if (excludesPath != null && !excludesPath.isEmpty()) {
+    def excludesFile = new File(excludesPath)
+    if (!excludesFile.isFile()) {
+        throw new GradleException('pci: ملفُّ الاستثناءات غيرُ موجود — لا يجري Gradle بلا حارسٍ تحقّق منه')
+    }
+    def patterns = excludesFile.readLines('UTF-8')
+            .collect { it.trim() }
+            .findAll { !it.isEmpty() && !it.startsWith('#') }
+    patterns.each { p ->
+        if (p.contains('*') || !(p =~ /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+\..+$/)) {
+            throw new GradleException('pci: نمطُ استثناءٍ غيرُ مقبول (نجمةٌ أو اسمٌ غيرُ كامل)')
+        }
+    }
+    gradle.allprojects {
+        tasks.withType(Test).configureEach { testTask ->
+            patterns.each { p -> testTask.filter.excludeTestsMatching(p) }
+            testTask.doFirst {
+                logger.lifecycle("pci: ${patterns.size()} دالّةً مستثناةً بالتصميم في ${testTask.path}")
+            }
+        }
+    }
+}

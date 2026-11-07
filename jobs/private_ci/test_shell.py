@@ -167,6 +167,48 @@ class CloneTest(unittest.TestCase):
             remotes = subprocess.run(["git", "-C", src, "remote"], capture_output=True, text=True).stdout
             self.assertEqual(remotes.strip(), "")
 
+    @unittest.skipUnless(shutil.which("git"), "لا git")
+    def test_app_test_clone_includes_quraat_out_but_never_forbidden_paths(self):
+        """تشغيلة 42391117587: ثمانيةُ اختباراتٍ تقرأ tools/quraat/out/mapping_warsh.json فتفشل بلا استنساخه. يدخل مجلّدُ الخرائط
+        وحده لـapp-test، ولا يدخل store/ ولا cloud/ ولا غيرُهما من المحرَّم بالتصميم."""
+        with tempfile.TemporaryDirectory() as d:
+            repo = os.path.join(d, "remote")
+            files = {"tools/quraat/out/mapping_warsh.json": "{}", "tools/quraat/other.py": "x", "tools/ai/a.py": "x",
+                     "store/site/app-ads.txt": "x", "cloud/worker/src/audio.ts": "x", "app/src/main/A.kt": "x"}
+            for rel, txt in files.items():
+                p = os.path.join(repo, *rel.split("/"))
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                with open(p, "w") as f:
+                    f.write(txt)
+            genv = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+            g = ["git", "-C", repo]
+            subprocess.run(["git", "init", "-q", repo], check=True, env=genv)
+            subprocess.run(g + ["config", "uploadpack.allowFilter", "true"], check=True, env=genv)
+            subprocess.run(g + ["config", "uploadpack.allowAnySHA1InWant", "true"], check=True, env=genv)
+            subprocess.run(g + ["add", "-A"], check=True, env=genv)
+            subprocess.run(g + ["commit", "-qm", "x"], check=True, env=genv)
+            head = subprocess.run(g + ["rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+            tmp = os.path.join(d, "rt"); os.makedirs(tmp)
+            env = base_env(tmp, PCI_KIND="app-test", PCI_SHA=head, PCI_SOURCE="public", GITHUB_REPOSITORY="x/y",
+                           PCI_TEST_REMOTE="file://" + repo)
+            r = sh("clone.sh", [], env, 120)
+            self.assertEqual(r.returncode, 0, readf(os.path.join(tmp, "pci", "out", "log.txt"))[-800:])
+            src = os.path.join(tmp, "pci", "src")
+            ex = lambda rel: os.path.exists(os.path.join(src, *rel.split("/")))  # noqa: E731
+            self.assertTrue(ex("tools/quraat/out/mapping_warsh.json"))
+            self.assertTrue(ex("tools/ai/a.py"))
+            self.assertFalse(ex("tools/quraat/other.py"), "دخل أكثرُ من مجلّد الخرائط")
+            self.assertFalse(ex("store"), "دخل store/ المحرَّم")
+            self.assertFalse(ex("cloud"), "دخل cloud/ المحرَّم")
+
+    def test_quraat_out_is_only_in_the_app_test_set_and_not_forbidden(self):
+        body = readf(os.path.join(HERE, "clone.sh"))
+        lines = [ln for ln in body.splitlines() if "/tools/quraat/out/" in ln and not ln.lstrip().startswith("#")]
+        self.assertEqual(len(lines), 1, lines)
+        self.assertTrue(lines[0].lstrip().startswith("app-test)"), lines[0])
+        import forbidden_excludes as fe
+        self.assertFalse(fe.FORBIDDEN_RX.search("tools/quraat/out/mapping_warsh.json"))
+
     @unittest.skipUnless(shutil.which("ssh-agent") and shutil.which("ssh-keygen") and shutil.which("ssh-add"),
                          "لا ssh-agent في هذه البيئة (يجري على العدّاء)")
     def test_private_key_and_agent_are_gone_after_failure(self):
@@ -769,6 +811,29 @@ class SupervisorTest(unittest.TestCase):
         self.assertEqual(sorted(c["failed_phase_ids"]), ["selftest_env", "selftest_ok"])
         self.assertFalse(c["ok"])
 
+    def test_forbidden_excludes_files_are_installed_in_the_control_entry_and_the_phase_runs_from_there(self):
+        """🚧 الحارسُ وسكربتُ Gradle والقائمةُ تُنسخ إلى مدخل التحكّم مع build.sh؛ والطورُ يجري منه (CTL_SELF) لا من الشجرة الخاصّة."""
+        self.write_kinds(tiny_kinds(["forbidden_excludes", "selftest_ok"]))
+        self.run_all()
+        ctl = os.path.join(self.rt, "builder", "ctl")
+        for name in ("forbidden_excludes.py", "forbidden_excludes.init.gradle", "forbidden_excludes.json"):
+            self.assertTrue(os.path.isfile(os.path.join(ctl, name)), name)
+            self.assertEqual(readf(os.path.join(ctl, name), "rb"), readf(os.path.join(HERE, name), "rb"), name)
+        self.assertEqual((self.rc("forbidden_excludes"), self.rc("selftest_ok")), ("0", "0"))
+        self.assertIn("forbidden_excludes: 0 دالّةً مستثناةً بالتصميم (النوع dry-run)", self.log())
+        self.assertEqual(self.ran()[:3], ["isolation", "clone", "forbidden_excludes"])
+
+    def test_tampered_exclude_list_in_the_control_entry_halts_later_phases(self):
+        """قائمةُ الاستثناءات في مدخل التحكّم تُفحص قبل كلّ طورٍ كـbuild.sh: أيُّ تغييرٍ ⇒ 126 فلا يجري Gradle بقائمةٍ مبدَّلة."""
+        self.write_kinds(tiny_kinds(["selftest_ok", "forbidden_excludes"]))
+        self.assertEqual(self.sup("prepare").returncode, 0)
+        self.assertEqual(self.sup("clone").returncode, 0)
+        with open(os.path.join(self.rt, "builder", "ctl", "forbidden_excludes.json"), "a", encoding="utf-8") as f:
+            f.write("\n")
+        rs = [self.sup(m) for m in ("build", "emu", "finalize")]
+        self.assertEqual((self.rc("selftest_ok"), self.rc("forbidden_excludes")), ("126", "126"))
+        self.assertIn("الأطوار: ⛔ مدخلُ التحكّم تغيّر", "\n".join(r.stdout for r in rs))
+
     def test_a1_control_entry_lives_in_a_root_owned_tree_and_its_chain_is_checked(self):
         """أ1: في الإنتاج المدخلُ في /var/lib/pci-ctl (install -d root 0755) لا في بيت pcibuild؛ والسلسلةُ تُفحص من الجذر وقبل كلّ طور؛
         وأربعةُ فحوصٍ سلبيّة بصفة pcibuild: إعادةُ تسمية · بديلٌ في مكانه · إعادةُ تسمية الشجرة · كتابة."""
@@ -1218,6 +1283,53 @@ class BuildScriptTest(unittest.TestCase):
             r = subprocess.run(["bash", os.path.join(HERE, "build.sh"), "step", "x"], env=env, capture_output=True,
                                text=True, timeout=30)
             self.assertEqual(r.returncode, 2)
+
+    def _excludes_env(self, d, kind="app-test"):
+        return {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": d, "GITHUB_WORKFLOW_REF": REF_OK,
+                "PCI_KIND": kind, "PCI_SRC": os.path.join(d, "src"), "PCI_BSTATE": os.path.join(d, "st"),
+                "PCI_BDEVICE": os.path.join(d, "dv")}
+
+    def test_forbidden_excludes_phase_passes_with_the_three_tests_and_writes_patterns(self):
+        import test_forbidden_excludes as tfe
+        with tempfile.TemporaryDirectory() as d:
+            for fqcn, (method, body) in tfe.SOURCES.items():
+                tfe.put(os.path.join(d, "src"), tfe.class_rel(fqcn), tfe.kt(fqcn, method, body))
+            r = subprocess.run(["bash", os.path.join(HERE, "build.sh"), "phase", "forbidden_excludes"], env=self._excludes_env(d),
+                               capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("3 دالّةً مستثناةً بالتصميم", r.stdout)
+            pats = [ln for ln in readf(os.path.join(d, "st", "forbidden_excludes.txt")).splitlines() if ln and not ln.startswith("#")]
+            self.assertEqual(len(pats), 3)
+
+    def test_forbidden_excludes_phase_fails_when_a_listed_class_is_missing_and_gradle_then_never_runs(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "src"))
+            env = self._excludes_env(d)
+            r = subprocess.run(["bash", os.path.join(HERE, "build.sh"), "phase", "forbidden_excludes"], env=env,
+                               capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertIn("رُفض الاستثناء", r.stdout)
+            self.assertFalse(os.path.exists(os.path.join(d, "st", "forbidden_excludes.txt")))
+            # ولو حاول أحدٌ تشغيل gradle بعده بلا ملفّ أجازه الحارسُ: يفشل قبل استدعاء ./gradlew أصلاً
+            r = subprocess.run(["bash", os.path.join(HERE, "build.sh"), "phase", "gradle"], env=env,
+                               capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertIn("لا ملفَّ استثناءاتٍ أجازه الحارس", r.stdout)
+
+    def test_gradle_app_test_command_uses_the_runner_owned_init_script_and_nothing_in_the_tree(self):
+        body = readf(os.path.join(HERE, "build.sh"))
+        code = "\n".join(ln for ln in body.splitlines() if not ln.lstrip().startswith("#"))
+        self.assertIn('--init-script "$CTL_SELF/forbidden_excludes.init.gradle"', code)
+        self.assertIn('"-Dpci.test.excludes=$EXCLUDES_OUT"', code)
+        self.assertIn('CTL_SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"', code)
+        # الحارسُ من مدخل التحكّم لا من الشجرة (PCI_SRC)، ولا @Ignore ولا assume في أيّ ملفّ للعدّاء
+        self.assertIn('python3 -I -S "$CTL_SELF/forbidden_excludes.py"', code)
+        self.assertNotIn("$PCI_SRC/forbidden_excludes", code)
+        for name in ("forbidden_excludes.init.gradle", "forbidden_excludes.json"):
+            txt = "\n".join(ln for ln in readf(os.path.join(HERE, name)).splitlines() if not ln.lstrip().startswith("//"))
+            self.assertNotRegex(txt, r"@Ignore|assume\w*\(")
+        # الأنواعُ الأخرى لا تمرّ بالتهيئة
+        self.assertEqual(code.count("--init-script"), 1)
 
     def test_ffmpeg_static_dir_is_added_to_path_for_every_phase(self):
         """ensure_ffmpeg.sh بلا sudo يبني تحت HOME؛ وكلُّ طورٍ عمليّةٌ جديدة فيلزم أن يجد ffmpeg في المسار."""

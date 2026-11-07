@@ -58,6 +58,8 @@ if [ "$LOCAL" = 1 ]; then BHOME="$RUNNER_TEMP/builder"; BUSER="$(id -un)"; else 
 BSRC="$BHOME/src"; BSTATE="$BHOME/state"; BDEV="$BHOME/device"
 # أ1: مدخلُ التحكّم الذي يستدعيه المشرفُ لكلّ طور — في الإنتاج شجرةٌ يملكها root بآبائها كلّها (لا بيتُ pcibuild القابلُ لإعادة التسمية)
 if [ "$LOCAL" = 1 ]; then CTL_DIR="$BHOME/ctl"; else CTL_DIR="/var/lib/pci-ctl"; fi
+# 🚧 ملفّاتُ الاستثناءات بالتصميم التي يقرؤها البناءُ من مدخل التحكّم (يملكها root كالمدخل نفسِه) — الحارسُ وسكربتُ تهيئة Gradle والقائمة
+CTL_EXTRA=(forbidden_excludes.py forbidden_excludes.init.gradle forbidden_excludes.json)
 ADB_PORT=15037                     # أ2: منفذُ خادم ADB الخاصّ بمستخدم البناء (لا 5037 الافتراضيّ)
 NPROC_MAX=4096                     # أ4: سقفُ عمليّات مستخدم البناء وخيوطه (ulimit -u) — يخفّف fork bomb
 FIN_RESERVE=365                    # أ4: ثوانٍ تُحجز من الميزانية للتنظيف والعدّ والتشفير والفحص (حسابُها أدناه · الإصلاح السادس)
@@ -169,9 +171,12 @@ root_chain_ok(){
 }
 # قبل كلّ طور: المدخلُ هو نسخةُ المشرف بعينها، وسلسلتُه (في الإنتاج) ما زالت لـroot
 ctl_intact(){
+  local f
   cmp -s "$PCI_CTL/build.sh" "$CTL_DIR/build.sh" || return 1
+  for f in "${CTL_EXTRA[@]}"; do cmp -s "$PCI_CTL/$f" "$CTL_DIR/$f" || return 1; done
   [ "$ISO" = 1 ] || return 0
-  root_chain_ok "$CTL_DIR/build.sh"
+  root_chain_ok "$CTL_DIR/build.sh" || return 1
+  for f in "${CTL_EXTRA[@]}"; do root_chain_ok "$CTL_DIR/$f" || return 1; done
 }
 
 # ───── prepare ─────
@@ -194,6 +199,12 @@ setup_builder(){ # ⛔ يجري قبل أوّل سطرٍ غيرِ موثوق —
   sudo -n install -d -o root -g root -m 0755 "$CTL_DIR" || return "$(setup_fail ctl-dir)"
   sudo -n install -o root -g root -m 0644 "$PCI_CTL/build.sh" "$PCI_CTL/iso_probe.py" "$CTL_DIR/" || return "$(setup_fail ctl-copy)"
   root_chain_ok "$CTL_DIR/build.sh" && root_chain_ok "$CTL_DIR/iso_probe.py" || return "$(setup_fail ctl-chain)"
+  # 🚧 ملفّاتُ الاستثناءات بالتصميم بالطريقة نفسِها: root يملكها وسلسلتُها كلُّها لـroot — فلا تعدّلها الشجرةُ الخاصّة
+  local ex
+  for ex in "${CTL_EXTRA[@]}"; do
+    sudo -n install -o root -g root -m 0644 "$PCI_CTL/$ex" "$CTL_DIR/" || return "$(setup_fail ctl-copy)"
+    root_chain_ok "$CTL_DIR/$ex" || return "$(setup_fail ctl-chain)"
+  done
   # أ3: لا مهامَّ مؤجّلةَ لمستخدم البناء (cron · at) تُحيي عمليّةً له بعد التنظيف
   printf 'pcibuild\n' | sudo -n tee -a /etc/cron.deny /etc/at.deny >/dev/null || return "$(setup_fail sched-deny)"
   # قراءةُ المشرف لشجرة البناء (تقاريرُ JUnit) بلا فتح البيت لغيره: ACL لمستخدم العدّاء وحدَه
@@ -334,6 +345,8 @@ do_prepare(){
   if [ "$LOCAL" = 1 ]; then   # محلّيّاً بيتُ البناء تحت RUNNER_TEMP؛ وفي Actions ينشئه sudo install في setup_builder
     mkdir -p "$BSTATE" "$BDEV" && install -D -m 0644 "$PCI_CTL/build.sh" "$CTL_DIR/build.sh" \
       && install -m 0644 "$PCI_CTL/iso_probe.py" "$CTL_DIR/iso_probe.py" || return 1
+    local ex
+    for ex in "${CTL_EXTRA[@]}"; do install -m 0644 "$PCI_CTL/$ex" "$CTL_DIR/$ex" || return 1; done
   fi
   # أ4: الميزانيةُ = مهلةُ الشوط في kinds.json من بدء المشرف؛ والأطوارُ تنتهي قبلها بـFIN_RESERVE فيبقى لـfinalize وقتُه.
   #     ووظيفةُ build في السير مهلتُها الميزانيةُ + هامشٌ (plan.py: job_timeout) فيسبق finalize دائماً إيقافَ GitHub.
