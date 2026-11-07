@@ -315,11 +315,13 @@ class PubkeyFileTest(unittest.TestCase):
 PUBLIC_LINE = re.compile(
     r"^(العزل: .*|الاستنساخ: [✅⛔].*|الأطوار \((build|emu)\): \d+ · فاشلة \d+|الأطوار: ⛔ .*|التنظيف: ⛔ .*|الناتج: .*"
     r"|الإنهاء: (التملّك \d+ ث من -?\d+ متاحة|⛔ انقضت مهلةُ التملّك — لا تُقرأ الشجرة \(\d+ ث من -?\d+ متاحة\)|⛔ تعذّر التملّك — لا تُقرأ الشجرة|\d+ ث من ميزانيةٍ أقصاها \d+)"
-    r"|المحاكي: .*|مسبارُ المحاكي: .*|المشرف: ⛔ .*)$")
+    r"|المحاكي: .*|مسبارُ المحاكي: .*|المشرف: ⛔ .*|الاستثناءات: ⛔ .*)$")
 ALLOWED_BUILDER_ENV = {
     "HOME", "PATH", "JAVA_HOME", "ANDROID_HOME", "ANDROID_SDK_ROOT", "ANDROID_USER_HOME", "GRADLE_USER_HOME", "GRADLE_OPTS",
     "CI", "TERM", "LANG", "PYTHONIOENCODING", "GITHUB_WORKFLOW_REF", "PCI_KIND", "PCI_LEG", "PCI_LINT", "PCI_SRC",
     "PCI_BSTATE", "PCI_BDEVICE", "PCI_WHISPER_REF", "PCI_RUN_TAG",
+    # Codex 6 §3: مالكُ مدخل التحكّم المعلَن لسكربت Gradle (root في الإنتاج)
+    "PCI_CTL_OWNER",
     # أ2: خادمُ ADB والمحاكي بمستخدم البناء بمنفذٍ ومجلّداتٍ خاصّة، ومعاملاتُ المحاكي بأنماطٍ مغلقة
     "ANDROID_ADB_SERVER_PORT", "ANDROID_AVD_HOME", "ANDROID_EMULATOR_HOME",
     "PCI_EMU_API", "PCI_EMU_TARGET", "PCI_EMU_ARCH", "PCI_EMU_PROFILE", "PCI_EMU_RAM",
@@ -328,10 +330,11 @@ ALLOWED_BUILDER_ENV = {
 }
 
 
-def tiny_kinds(phases, emu_flags=None, kind="dry-run", timeout=15):
+def tiny_kinds(phases, emu_flags=None, kind="dry-run", timeout=15, runner=()):
     emu_flags = emu_flags or {}
     return {kind: {"source": "public",
-                   "phases": [{"id": p, "who": "builder", "emu": emu_flags.get(p, False), "optional": False} for p in phases],
+                   "phases": [{"id": p, "who": "runner" if p in runner else "builder", "emu": emu_flags.get(p, False),
+                               "optional": False} for p in phases],
                    "legs": [{"id": "main", "timeout": timeout}]}}
 
 
@@ -568,15 +571,15 @@ class SupervisorTest(unittest.TestCase):
         self.assertIn("لا وقتَ كافياً", self.log())
 
     def test_budget_starts_with_the_supervisor_and_phases_stop_five_minutes_before(self):
-        """أ4: الميزانيةُ (مهلةُ الشوط) تُحسب من بدء المشرف وتشمل كلَّ شيء؛ والأطوارُ تنتهي قبلها بـFIN_RESERVE (365 ث منذ الإصلاح السادس) لـfinalize؛
+        """أ4: الميزانيةُ (مهلةُ الشوط) تُحسب من بدء المشرف وتشمل كلَّ شيء؛ والأطوارُ تنتهي قبلها بـFIN_RESERVE (370 ث منذ ختم الاستثناءات · Codex 6) لـfinalize؛
         ووظيفةُ build في السير مهلتُها الميزانيةُ + هامش (job_timeout) فيسبق finalize إيقافَ GitHub."""
         self.write_kinds(tiny_kinds(["selftest_ok"], timeout=75))
         before = int(time.time())
         self.sup("prepare")
         dl = int(readf(os.path.join(self.pci, "state", "deadline")))
         be = int(readf(os.path.join(self.pci, "state", "budget_end")))
-        self.assertTrue(before + 75 * 60 - 365 - 5 <= dl <= int(time.time()) + 75 * 60 - 365 + 5, dl - before)
-        self.assertEqual(be - dl, 365)
+        self.assertTrue(before + 75 * 60 - 370 - 5 <= dl <= int(time.time()) + 75 * 60 - 370 + 5, dl - before)
+        self.assertEqual(be - dl, 370)
         wf = readf(os.path.join(HERE, "..", "..", ".github", "workflows", "private-ci.yml"))
         self.assertIn("timeout-minutes: ${{ matrix.leg.job_timeout }}", wf)
         import plan
@@ -811,28 +814,161 @@ class SupervisorTest(unittest.TestCase):
         self.assertEqual(sorted(c["failed_phase_ids"]), ["selftest_env", "selftest_ok"])
         self.assertFalse(c["ok"])
 
-    def test_forbidden_excludes_files_are_installed_in_the_control_entry_and_the_phase_runs_from_there(self):
-        """🚧 الحارسُ وسكربتُ Gradle والقائمةُ تُنسخ إلى مدخل التحكّم مع build.sh؛ والطورُ يجري منه (CTL_SELF) لا من الشجرة الخاصّة."""
-        self.write_kinds(tiny_kinds(["forbidden_excludes", "selftest_ok"]))
+    def test_forbidden_excludes_is_verified_by_the_supervisor_and_installed_in_the_control_entry(self):
+        """🚧 Codex 6 §3: الحارسُ يجري بحساب المشرف في الاستنساخ (قبل تسليم الشجرة)، وطورُ forbidden_excludes **الموثوق** يطابق أنماطَه
+        بالقائمة الموثوقة ويثبّتها في مدخل التحكّم مع الحارس وسكربت Gradle والقائمة؛ ثمّ تجري أطوارُ البناء والختمُ سليم."""
+        self.write_kinds(tiny_kinds(["forbidden_excludes", "selftest_ok"], runner=("forbidden_excludes",)))
         self.run_all()
         ctl = os.path.join(self.rt, "builder", "ctl")
         for name in ("forbidden_excludes.py", "forbidden_excludes.init.gradle", "forbidden_excludes.json"):
             self.assertTrue(os.path.isfile(os.path.join(ctl, name)), name)
             self.assertEqual(readf(os.path.join(ctl, name), "rb"), readf(os.path.join(HERE, name), "rb"), name)
+        import forbidden_excludes as fe
+        self.assertEqual(readf(os.path.join(ctl, "forbidden_excludes.txt"), "rb"), fe.canonical([]).encode())
+        self.assertEqual(readf(os.path.join(self.pci, "state", "forbidden_excludes.txt"), "rb"), fe.canonical([]).encode())
         self.assertEqual((self.rc("forbidden_excludes"), self.rc("selftest_ok")), ("0", "0"))
-        self.assertIn("forbidden_excludes: 0 دالّةً مستثناةً بالتصميم (النوع dry-run)", self.log())
-        self.assertEqual(self.ran()[:3], ["isolation", "clone", "forbidden_excludes"])
+        log = self.log()
+        self.assertIn("forbidden_excludes: 0 دالّةً مستثناةً بالتصميم (النوع dry-run)", log)
+        self.assertIn("حارسُ الاستثناءات (بحساب المشرف قبل التسليم) = 0", log)
+        self.assertLess(log.index("حارسُ الاستثناءات (بحساب المشرف قبل التسليم)"), log.index("← forbidden_excludes (runner)"))
+        self.assertLess(log.index("← forbidden_excludes (runner)"), log.index("← selftest_ok (builder)"))
+        self.assertIn("الاستثناءات: 0 نمطاً تطابق القائمةَ الموثوقة", log)
+        self.assertEqual(self.ran()[:4], ["isolation", "clone", "forbidden_excludes", "selftest_ok"])
+        self.assertEqual(self.counts()["failed_phase_ids"], [])
+        self.assertNotIn("الاستثناءات: ⛔", "\n".join(r.stdout for _, r in self.outputs))
 
     def test_tampered_exclude_list_in_the_control_entry_halts_later_phases(self):
-        """قائمةُ الاستثناءات في مدخل التحكّم تُفحص قبل كلّ طورٍ كـbuild.sh: أيُّ تغييرٍ ⇒ 126 فلا يجري Gradle بقائمةٍ مبدَّلة."""
-        self.write_kinds(tiny_kinds(["selftest_ok", "forbidden_excludes"]))
+        """قائمةُ الاستثناءات في مدخل التحكّم تُفحص قبل كلّ طورٍ كـbuild.sh: أيُّ تغييرٍ ⇒ 126 فلا يجري Gradle بقائمةٍ مبدَّلة.
+        (والطورُ الموثوقُ يطابق بنسخة المشرف لا بنسخة المدخل، فلا يُخدع بها.)"""
+        self.write_kinds(tiny_kinds(["forbidden_excludes", "selftest_ok", "selftest_env"], runner=("forbidden_excludes",)))
         self.assertEqual(self.sup("prepare").returncode, 0)
         self.assertEqual(self.sup("clone").returncode, 0)
         with open(os.path.join(self.rt, "builder", "ctl", "forbidden_excludes.json"), "a", encoding="utf-8") as f:
             f.write("\n")
         rs = [self.sup(m) for m in ("build", "emu", "finalize")]
-        self.assertEqual((self.rc("selftest_ok"), self.rc("forbidden_excludes")), ("126", "126"))
+        self.assertEqual((self.rc("forbidden_excludes"), self.rc("selftest_ok"), self.rc("selftest_env")), ("0", "126", "126"))
         self.assertIn("الأطوار: ⛔ مدخلُ التحكّم تغيّر", "\n".join(r.stdout for r in rs))
+
+    def test_codex6_patterns_widened_after_install_are_caught_before_the_next_phase_and_in_finalize(self):
+        """Codex 6 §3 — العبثُ بعد الحارس: طورٌ يوسّع ملفَّ الأنماط المثبَّت (في الإنتاج يملكه root فيفشل) ⇒ الطورُ التالي لا يُستدعى (126)
+        والختمُ في finalize يُفشل طورَ forbidden_excludes (125) فلا يُعلن عددُ المستثنى ولا ينجح الشوط."""
+        self.write_kinds(tiny_kinds(["forbidden_excludes", "selftest_excl_tamper", "selftest_ok"], runner=("forbidden_excludes",)))
+        rs = self.run_all()
+        self.assertEqual((self.rc("selftest_excl_tamper"), self.rc("selftest_ok"), self.rc("forbidden_excludes")), ("0", "126", "125"))
+        out = "\n".join(r.stdout for r in rs)
+        self.assertIn("الأطوار: ⛔ مدخلُ التحكّم تغيّر", out)
+        self.assertIn("الاستثناءات: ⛔ ملفُّ الأنماط في مدخل التحكّم تغيّر بعد التثبيت أو زُرع — لا يُعلن عددُ المستثنى", out)
+        c = self.counts()
+        self.assertEqual(sorted(c["failed_phase_ids"]), ["forbidden_excludes", "selftest_ok"])
+        self.assertFalse(c["ok"])
+        import publish
+        self.assertEqual(publish.excluded_count("dry-run", [{"schema_ok": True, "counts": c}]), 0)
+
+    def test_codex6_tamper_in_the_last_phase_is_caught_by_the_final_seal(self):
+        """العبثُ في آخر طور (لا طورَ بعده يفحص المدخل): يكشفه الختمُ بعد زوال البناء ⇒ 125 وحدَه، والشوطُ فاشل."""
+        self.write_kinds(tiny_kinds(["forbidden_excludes", "selftest_ok", "selftest_excl_tamper"], runner=("forbidden_excludes",)))
+        self.run_all()
+        self.assertEqual((self.rc("selftest_ok"), self.rc("selftest_excl_tamper"), self.rc("forbidden_excludes")), ("0", "0", "125"))
+        c = self.counts()
+        self.assertEqual(c["failed_phase_ids"], ["forbidden_excludes"])
+        self.assertFalse(c["ok"])
+
+    def test_codex6_patterns_planted_without_install_halt_later_phases(self):
+        """بلا تثبيتٍ من المشرف لا وجودَ لملفّ الأنماط في المدخل أصلاً: زرعُه من طورٍ ⇒ لا يُستدعى بعده طور."""
+        self.write_kinds(tiny_kinds(["selftest_excl_tamper", "selftest_ok"]))
+        self.run_all()
+        self.assertEqual((self.rc("selftest_excl_tamper"), self.rc("selftest_ok")), ("0", "126"))
+
+    def test_codex6_guard_refusal_installs_nothing_and_gradle_never_runs(self):
+        """الحارسُ يرفض (صنفٌ مدرجٌ غائبٌ من الاستنساخ) ⇒ لا تثبيت (طورُ forbidden_excludes = 1) ولا يُستدعى ./gradlew أصلاً."""
+        self.head = self.make_app_remote(wrapper="honest", with_sources=False)
+        self.write_kinds(tiny_kinds(["forbidden_excludes", "gradle"], kind="app-test", runner=("forbidden_excludes",)))
+        self.run_all(PCI_KIND="app-test")
+        self.assertEqual((self.rc("forbidden_excludes"), self.rc("gradle")), ("1", "1"))
+        self.assertFalse(os.path.exists(os.path.join(self.rt, "builder", "ctl", "forbidden_excludes.txt")))
+        self.assertFalse(os.path.exists(os.path.join(self.rt, "builder", "state", "wrapper_args")))
+        log = self.log()
+        self.assertIn("رُفض الاستثناء", log)
+        self.assertIn("لا ملفَّ استثناءاتٍ ثبّته المشرف — لا يجري Gradle", log)
+
+    # ───── Codex 6 §3: wrapper المستودع (./gradlew غيرُ موثوق) ─────
+    WRAPPERS = {
+        # يسجّل معاملاتِه ويكتب تقريرَ JUnit ثمّ ينجح — لا يمسّ ملفَّ الأنماط
+        "honest": 'printf "%s\\n" "$@" > "$PCI_BSTATE/wrapper_args"\n'
+                  'mkdir -p app/build/test-results/t\n'
+                  "printf '<testsuite tests=\"5\" failures=\"0\" errors=\"0\" skipped=\"0\"/>' > app/build/test-results/t/a.xml\n",
+        # كالأمين ثمّ يوسّع ملفَّ الأنماط الذي سُمّي له في سطر الأوامر قبل أن يُشغّل Gradle
+        "widen": 'printf "%s\\n" "$@" > "$PCI_BSTATE/wrapper_args"\n'
+                 'for a in "$@"; do case "$a" in -Dpci.test.excludes=*) f="${a#-Dpci.test.excludes=}" ;; esac; done\n'
+                 '[ -n "${f:-}" ] && printf "com.evil.Wrapper.extra\\n" >> "$f"\n'
+                 'mkdir -p app/build/test-results/t\n'
+                 "printf '<testsuite tests=\"5\" failures=\"0\" errors=\"0\" skipped=\"0\"/>' > app/build/test-results/t/a.xml\n",
+    }
+
+    def make_app_remote(self, wrapper, with_sources=True):
+        """مستودعٌ محلّيٌّ بنوع app-test: ./gradlew مزيَّفٌ (WRAPPERS) والأصنافُ الثلاثة كما يقرؤها الحارس (tfe.SOURCES)."""
+        import test_forbidden_excludes as tfe
+        repo = os.path.join(self.d, "remote")
+        shutil.rmtree(repo, ignore_errors=True)
+        os.makedirs(repo)
+        with open(os.path.join(repo, "gradlew"), "w", encoding="utf-8") as f:
+            f.write("#!/bin/bash\n" + self.WRAPPERS[wrapper] + "exit 0\n")
+        os.chmod(os.path.join(repo, "gradlew"), 0o755)
+        if with_sources:
+            for fqcn, (method, body) in tfe.SOURCES.items():
+                tfe.put(repo, tfe.class_rel(fqcn), tfe.kt(fqcn, method, body))
+        else:
+            tfe.put(repo, "app/src/test/kotlin/x/Other.kt", "package x\n\nclass Other\n")
+        g = ["git", "-C", repo]
+        genv = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+        subprocess.run(["git", "init", "-q", repo], check=True, env=genv)
+        subprocess.run(g + ["config", "uploadpack.allowFilter", "true"], check=True, env=genv)
+        subprocess.run(g + ["config", "uploadpack.allowAnySHA1InWant", "true"], check=True, env=genv)
+        subprocess.run(g + ["add", "-A"], check=True, env=genv)
+        subprocess.run(g + ["commit", "-qm", "x"], check=True, env=genv)
+        return subprocess.run(g + ["rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+
+    def app_counts(self):
+        return cs.validate(readf(os.path.join(self.pci, "art", "counts.json"), "rb"), "app-test", "main", self.head,
+                           json.loads(readf(self.kinds_file)))
+
+    def test_codex6_honest_wrapper_gets_the_sealed_control_paths_and_the_count_is_published(self):
+        """الموجبُ: Gradle يُستدعى بسكربت التهيئة والملفّ والقائمة من مدخل التحكّم وبالنوع والمالك المعلَن؛ والختمُ سليم ⇒ يُعلن 3."""
+        self.head = self.make_app_remote("honest")
+        self.write_kinds(tiny_kinds(["forbidden_excludes", "gradle"], kind="app-test", runner=("forbidden_excludes",)))
+        self.run_all(PCI_KIND="app-test")
+        self.assertEqual((self.rc("forbidden_excludes"), self.rc("gradle")), ("0", "0"))
+        ctl = os.path.join(self.rt, "builder", "ctl")
+        args = readf(os.path.join(self.rt, "builder", "state", "wrapper_args")).splitlines()
+        i = args.index("--init-script")
+        self.assertEqual(args[i + 1], os.path.join(ctl, "forbidden_excludes.init.gradle"))
+        for want in (f"-Dpci.test.excludes={os.path.join(ctl, 'forbidden_excludes.txt')}",
+                     f"-Dpci.test.excludes.list={os.path.join(ctl, 'forbidden_excludes.json')}",
+                     "-Dpci.test.excludes.kind=app-test", f"-Dpci.test.excludes.owner={__import__('pwd').getpwuid(os.getuid()).pw_name}"):
+            self.assertIn(want, args)
+        import forbidden_excludes as fe
+        self.assertEqual(readf(os.path.join(ctl, "forbidden_excludes.txt"), "rb"),
+                         fe.canonical(fe.expected_patterns("app-test")).encode())
+        c = self.app_counts()
+        self.assertEqual(c["failed_phase_ids"], [])
+        self.assertTrue(c["ok"])
+        import publish
+        self.assertEqual(publish.excluded_count("app-test", [{"schema_ok": True, "counts": c}]), 3)
+
+    def test_codex6_wrapper_that_widens_the_patterns_is_caught_and_the_count_is_not_published(self):
+        """العبثُ من داخل wrapper: ./gradlew يوسّع ملفَّ الأنماط ثمّ ينجح ⇒ الختمُ بعد زوال البناء يُفشل forbidden_excludes (125)،
+        فالشوطُ فاشلٌ ولا يُعلن عددُ المستثنى (وفي الإنتاج لا يكتب pcibuild في ملفٍّ لـroot أصلاً)."""
+        self.head = self.make_app_remote("widen")
+        self.write_kinds(tiny_kinds(["forbidden_excludes", "gradle"], kind="app-test", runner=("forbidden_excludes",)))
+        rs = self.run_all(PCI_KIND="app-test")
+        self.assertEqual((self.rc("forbidden_excludes"), self.rc("gradle")), ("125", "0"))
+        self.assertIn("com.evil.Wrapper.extra", readf(os.path.join(self.rt, "builder", "ctl", "forbidden_excludes.txt")))
+        self.assertIn("الاستثناءات: ⛔", "\n".join(r.stdout for r in rs))
+        c = self.app_counts()
+        self.assertEqual(c["failed_phase_ids"], ["forbidden_excludes"])
+        self.assertFalse(c["ok"])
+        import publish
+        self.assertEqual(publish.excluded_count("app-test", [{"schema_ok": True, "counts": c}]), 0)
 
     def test_a1_control_entry_lives_in_a_root_owned_tree_and_its_chain_is_checked(self):
         """أ1: في الإنتاج المدخلُ في /var/lib/pci-ctl (install -d root 0755) لا في بيت pcibuild؛ والسلسلةُ تُفحص من الجذر وقبل كلّ طور؛
@@ -1013,7 +1149,7 @@ class SupervisorTest(unittest.TestCase):
         self.run_all()
         out = self.outputs[-1][1].stdout
         self.assertRegex(out, r"(?m)^الإنهاء: التملّك \d+ ث من \d+ متاحة$")
-        self.assertRegex(out, r"(?m)^الإنهاء: \d+ ث من ميزانيةٍ أقصاها 365$")
+        self.assertRegex(out, r"(?m)^الإنهاء: \d+ ث من ميزانيةٍ أقصاها 370$")
         self.assertEqual(self.ready(), "ready=true")
 
     def test_fix5_finalize_budget_is_bounded_by_fin_reserve_in_the_source(self):
@@ -1179,7 +1315,7 @@ class SupervisorTest(unittest.TestCase):
         val = lambda name: int(re.search(rf"\b{name}=(\d+)", body).group(1))   # noqa: E731
         P = val("FIN_CMD") + val("FIN_CMD_KILL")
         R = P + val("FIN_CMD_KILL")
-        worst = 2 * P + R + 3 * (R + val("FIN_WAIT") + P)              # foreign_emu_procs + crontab + 3 جولات
+        worst = 2 * P + R + 3 * (R + val("FIN_WAIT") + P) + P          # foreign_emu_procs + crontab + 3 جولات + ختمُ الاستثناءات (Codex 6)
         self.assertLessEqual(worst, val("FIN_CAP_CLEAN"))
         after = val("FIN_CAP_COUNTS") + val("FIN_CAP_GUARD") + val("FIN_CAP_ENC") + val("FIN_CAP_CHECK") + 4 * val("FIN_KILL")
         self.assertLessEqual(val("FIN_CAP_CLEAN") + val("FIN_OWN_MIN") + val("FIN_KILL") + after, val("FIN_RESERVE"))
@@ -1287,49 +1423,116 @@ class BuildScriptTest(unittest.TestCase):
     def _excludes_env(self, d, kind="app-test"):
         return {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": d, "GITHUB_WORKFLOW_REF": REF_OK,
                 "PCI_KIND": kind, "PCI_SRC": os.path.join(d, "src"), "PCI_BSTATE": os.path.join(d, "st"),
-                "PCI_BDEVICE": os.path.join(d, "dv")}
+                "PCI_BDEVICE": os.path.join(d, "dv"), "PCI_CTL_OWNER": "root"}
 
-    def test_forbidden_excludes_phase_passes_with_the_three_tests_and_writes_patterns(self):
-        import test_forbidden_excludes as tfe
+    def _ctl_copy(self, d):
+        """نسخةٌ من مدخل التحكّم (build.sh ورفاقُه) في مجلّدٍ مؤقّت — فلا يُكتب في مجلّد المصدر شيء."""
+        ctl = os.path.join(d, "ctl")
+        os.makedirs(ctl)
+        for name in ("build.sh", "forbidden_excludes.py", "forbidden_excludes.init.gradle", "forbidden_excludes.json"):
+            shutil.copyfile(os.path.join(HERE, name), os.path.join(ctl, name))
+        os.makedirs(os.path.join(d, "src"))
+        with open(os.path.join(d, "src", "gradlew"), "w", encoding="utf-8") as f:
+            f.write('#!/bin/bash\nprintf "%s\\n" "$@" > "$PCI_BSTATE/wrapper_args"\nexit 0\n')
+        return ctl
+
+    def test_codex6_the_guard_is_no_longer_a_builder_phase(self):
+        """Codex 6 §3: لا يجري الحارسُ بمستخدم البناء ولا يكتب في مجلّده — طورُ forbidden_excludes غيرُ معروفٍ لـbuild.sh."""
         with tempfile.TemporaryDirectory() as d:
-            for fqcn, (method, body) in tfe.SOURCES.items():
-                tfe.put(os.path.join(d, "src"), tfe.class_rel(fqcn), tfe.kt(fqcn, method, body))
-            r = subprocess.run(["bash", os.path.join(HERE, "build.sh"), "phase", "forbidden_excludes"], env=self._excludes_env(d),
+            ctl = self._ctl_copy(d)
+            r = subprocess.run(["bash", os.path.join(ctl, "build.sh"), "phase", "forbidden_excludes"], env=self._excludes_env(d),
+                               capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 2, r.stdout)
+            self.assertFalse(os.path.exists(os.path.join(d, "st", "forbidden_excludes.txt")))
+
+    def test_codex6_gradle_never_runs_without_the_supervisor_installed_patterns(self):
+        with tempfile.TemporaryDirectory() as d:
+            ctl = self._ctl_copy(d)
+            env = self._excludes_env(d)
+            # ولو كتب البناءُ ملفّاً بالاسم القديم في مجلّده: لا يُقرأ
+            os.makedirs(os.path.join(d, "st"), exist_ok=True)
+            with open(os.path.join(d, "st", "forbidden_excludes.txt"), "w", encoding="utf-8") as f:
+                f.write("# x\n")
+            r = subprocess.run(["bash", os.path.join(ctl, "build.sh"), "phase", "gradle"], env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertIn("لا ملفَّ استثناءاتٍ ثبّته المشرف — لا يجري Gradle", r.stdout)
+            self.assertFalse(os.path.exists(os.path.join(d, "st", "wrapper_args")))
+            # رابطٌ رمزيٌّ في مكان الملفّ المثبَّت لا يُقبل
+            os.symlink(os.path.join(d, "st", "forbidden_excludes.txt"), os.path.join(ctl, "forbidden_excludes.txt"))
+            r = subprocess.run(["bash", os.path.join(ctl, "build.sh"), "phase", "gradle"], env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertFalse(os.path.exists(os.path.join(d, "st", "wrapper_args")))
+
+    def test_codex6_gradle_gets_the_control_entry_paths_kind_and_declared_owner(self):
+        with tempfile.TemporaryDirectory() as d:
+            ctl = self._ctl_copy(d)
+            with open(os.path.join(ctl, "forbidden_excludes.txt"), "w", encoding="utf-8") as f:
+                f.write("# x\n")
+            r = subprocess.run(["bash", os.path.join(ctl, "build.sh"), "phase", "gradle"], env=self._excludes_env(d),
                                capture_output=True, text=True, timeout=60)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-            self.assertIn("3 دالّةً مستثناةً بالتصميم", r.stdout)
-            pats = [ln for ln in readf(os.path.join(d, "st", "forbidden_excludes.txt")).splitlines() if ln and not ln.startswith("#")]
-            self.assertEqual(len(pats), 3)
-
-    def test_forbidden_excludes_phase_fails_when_a_listed_class_is_missing_and_gradle_then_never_runs(self):
-        with tempfile.TemporaryDirectory() as d:
-            os.makedirs(os.path.join(d, "src"))
-            env = self._excludes_env(d)
-            r = subprocess.run(["bash", os.path.join(HERE, "build.sh"), "phase", "forbidden_excludes"], env=env,
-                               capture_output=True, text=True, timeout=60)
-            self.assertEqual(r.returncode, 1, r.stdout)
-            self.assertIn("رُفض الاستثناء", r.stdout)
-            self.assertFalse(os.path.exists(os.path.join(d, "st", "forbidden_excludes.txt")))
-            # ولو حاول أحدٌ تشغيل gradle بعده بلا ملفّ أجازه الحارسُ: يفشل قبل استدعاء ./gradlew أصلاً
-            r = subprocess.run(["bash", os.path.join(HERE, "build.sh"), "phase", "gradle"], env=env,
-                               capture_output=True, text=True, timeout=60)
-            self.assertEqual(r.returncode, 1, r.stdout)
-            self.assertIn("لا ملفَّ استثناءاتٍ أجازه الحارس", r.stdout)
+            args = readf(os.path.join(d, "st", "wrapper_args")).splitlines()
+            self.assertEqual(args[args.index("--init-script") + 1], os.path.join(ctl, "forbidden_excludes.init.gradle"))
+            for want in (f"-Dpci.test.excludes={os.path.join(ctl, 'forbidden_excludes.txt')}",
+                         f"-Dpci.test.excludes.list={os.path.join(ctl, 'forbidden_excludes.json')}",
+                         "-Dpci.test.excludes.kind=app-test", "-Dpci.test.excludes.owner=root"):
+                self.assertIn(want, args)
+            # وبلا مالكٍ معلَنٍ في البيئة لا يجري Gradle
+            env = self._excludes_env(d); env.pop("PCI_CTL_OWNER"); os.remove(os.path.join(d, "st", "wrapper_args"))
+            r = subprocess.run(["bash", os.path.join(ctl, "build.sh"), "phase", "gradle"], env=env, capture_output=True, text=True, timeout=60)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertFalse(os.path.exists(os.path.join(d, "st", "wrapper_args")))
 
     def test_gradle_app_test_command_uses_the_runner_owned_init_script_and_nothing_in_the_tree(self):
         body = readf(os.path.join(HERE, "build.sh"))
         code = "\n".join(ln for ln in body.splitlines() if not ln.lstrip().startswith("#"))
         self.assertIn('--init-script "$CTL_SELF/forbidden_excludes.init.gradle"', code)
-        self.assertIn('"-Dpci.test.excludes=$EXCLUDES_OUT"', code)
+        self.assertIn('"-Dpci.test.excludes=$EXCLUDES_FILE"', code)
+        self.assertIn('EXCLUDES_FILE="$CTL_SELF/forbidden_excludes.txt"', code)
+        self.assertIn('"-Dpci.test.excludes.list=$CTL_SELF/forbidden_excludes.json"', code)
+        self.assertIn('"-Dpci.test.excludes.owner=${PCI_CTL_OWNER:?}"', code)
         self.assertIn('CTL_SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"', code)
-        # الحارسُ من مدخل التحكّم لا من الشجرة (PCI_SRC)، ولا @Ignore ولا assume في أيّ ملفّ للعدّاء
-        self.assertIn('python3 -I -S "$CTL_SELF/forbidden_excludes.py"', code)
+        # Codex 6 §3: لا حارسَ ولا ملفَّ أنماطٍ يكتبه البناء (لا PCI_BSTATE في مسار الأنماط)، ولا شيءَ من الشجرة
+        self.assertNotIn("forbidden_excludes.py", code)
+        self.assertNotIn("$PCI_BSTATE/forbidden_excludes", code)
         self.assertNotIn("$PCI_SRC/forbidden_excludes", code)
         for name in ("forbidden_excludes.init.gradle", "forbidden_excludes.json"):
             txt = "\n".join(ln for ln in readf(os.path.join(HERE, name)).splitlines() if not ln.lstrip().startswith("//"))
             self.assertNotRegex(txt, r"@Ignore|assume\w*\(")
         # الأنواعُ الأخرى لا تمرّ بالتهيئة
         self.assertEqual(code.count("--init-script"), 1)
+
+    def test_codex6_supervisor_runs_the_guard_on_the_pristine_tree_and_installs_root_owned(self):
+        """بالقراءة: الحارسُ في do_clone بعد clone.sh وقبل move_src ببيئةٍ فارغة؛ والتثبيتُ root 0644 بسلسلةٍ لـroot؛ وctl_intact
+        يقارن المثبَّت بمرجع المشرف؛ والختمُ بعد التنظيف وقبل التملّك تحت tmo."""
+        body = readf(os.path.join(HERE, "supervise.sh"))
+        code = "\n".join(ln for ln in body.splitlines() if not ln.lstrip().startswith("#"))
+        clone = code[code.index("do_clone(){"):code.index("free_disk(){")]
+        self.assertLess(clone.index('bash "$PCI_CTL/clone.sh"'), clone.index("excl_guard"))
+        self.assertLess(clone.index("excl_guard"), clone.index("! move_src"))
+        guard = code[code.index("excl_guard(){"):code.index("move_src(){")]
+        self.assertIn('env -i "PATH=$PATH"', guard)
+        self.assertIn('python3 -I -S "$PCI_CTL/forbidden_excludes.py"', guard)
+        self.assertIn('--src "$PCI_ROOT/src"', guard)
+        self.assertIn('--out "$PCI_STATE/$EXCL_RUN"', guard)
+        inst = code[code.index("excl_install(){"):code.index("run_runner_phase(){")]
+        self.assertIn('sudo -n install -o root -g root -m 0644 "$PCI_STATE/$EXCL_RUN" "$CTL_DIR/$EXCL_RUN"', inst)
+        self.assertIn('root_chain_ok "$CTL_DIR/$EXCL_RUN"', inst)
+        self.assertLess(inst.index(" check --kind"), inst.index("install -o root"))
+        rrp = code[code.index("run_runner_phase(){"):code.index("alive(){")]
+        self.assertIn("forbidden_excludes) ( excl_install ) ;;", rrp)
+        intact = code[code.index("ctl_intact(){"):code.index("install_age(){")]
+        self.assertIn('cmp -s "$PCI_STATE/$EXCL_RUN" "$CTL_DIR/$EXCL_RUN"', intact)
+        fin = code[code.index("do_finalize(){"):code.index('if [ "$MODE" != "prepare" ]')]
+        self.assertLess(fin.index("do_cleanup"), fin.index("excl_seal_final"))
+        self.assertLess(fin.index("excl_seal_final"), fin.index("take_ownership"))
+        seal = code[code.index("excl_seal_final(){"):code.index("fin_secs(){")]
+        self.assertIn('tmo "$FIN_CMD" python3 -I -S "$PCI_CTL/forbidden_excludes.py" sealed', seal)
+        self.assertIn("chain=(--chain-uid 0)", seal)
+        self.assertIn("rc_set forbidden_excludes 125", seal)
+        # في الإنتاج: لا ملفَّ أنماطٍ قديمٌ في المدخل قبل أوّل طور، والمالكُ المعلَن root
+        self.assertIn('sudo -n rm -f "$CTL_DIR/$EXCL_RUN"', code)
+        self.assertIn('else CTL_OWNER=root; fi', code)
 
     def test_ffmpeg_static_dir_is_added_to_path_for_every_phase(self):
         """ensure_ffmpeg.sh بلا sudo يبني تحت HOME؛ وكلُّ طورٍ عمليّةٌ جديدة فيلزم أن يجد ffmpeg في المسار."""

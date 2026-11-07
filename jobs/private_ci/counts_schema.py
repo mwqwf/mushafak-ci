@@ -44,13 +44,14 @@ PHASES = frozenset({
     "sysimg", "emu_up",
     # 🧱 حزمُ SDK (NDK وCMake) بحساب العدّاء في SDK المحصَّن أوّلَ كلّ نوعٍ خاصّ (التشغيل الواحد 2026-11-07)
     "sdk_pkgs",
-    # 🚧 حارسُ الاستثناءات بالتصميم (forbidden_excludes.py): يثبت أنّ كلَّ دالّةٍ مستثناةٍ تقرأ مساراً محرَّماً قبل أن يجري Gradle
+    # 🚧 حارسُ الاستثناءات بالتصميم (forbidden_excludes.py): يثبت أنّ كلَّ دالّةٍ مستثناةٍ تقرأ مساراً محرَّماً قبل أن يجري Gradle.
+    #    Codex 6 §3: طورٌ موثوقٌ بحساب العدّاء يثبّت ما أجازه الحارسُ (في الاستنساخ) في مدخل التحكّم؛ ويُفشله ختمُ finalize (125) إن تغيّر
     "forbidden_excludes",
     # الإصلاحُ الخامس: مسبارُ المحاكي الحيّ (طورٌ موثوقٌ بحساب العدّاء) والشجرةُ الكبيرة — في التجربتين العامّتين وحدهما
     "emu_probe", "stress_tree",
     # أطوارٌ تجريبيّةٌ للاختبار المحلّيّ وحده (kinds.json الإنتاجيّ لا يذكرها — يفرض ذلك test_counts_schema)
     "selftest_ok", "selftest_fail", "selftest_noisy", "selftest_forge", "selftest_env",
-    "selftest_tamper", "selftest_linger", "selftest_hold", "selftest_sleep", "selftest_limits",
+    "selftest_tamper", "selftest_linger", "selftest_hold", "selftest_sleep", "selftest_limits", "selftest_excl_tamper",
 })
 # أطوارُ تجهيزٍ لا تُعدّ «اختباراً» حين لا تقرير JUnit (لكنّ فشلَها يُسقط الشوط).
 PREP = frozenset({"clone", "gradle", "pip", "ffmpeg", "whisper", "fatiha", "disk", "kvm", "bundletool", "request",

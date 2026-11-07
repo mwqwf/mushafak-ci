@@ -7,7 +7,8 @@
 #   prepare  — ينسخ أدواتِه إلى $RUNNER_TEMP/pci/ctl (700) · يثبّت age · ينشئ pcibuild ويحصّن SDK وhostedtoolcache و/home/runner ·
 #              ويضع مدخلَ التحكّم (build.sh · iso_probe.py) في /var/lib/pci-ctl بآباءٍ كلُّها لـroot (أ1) ·
 #              ثمّ **يختبر العزلَ بنفسه** (rc_isolation — 21 فحصاً؛ والعشرون: جردُ المقابس يفشل مغلقاً ويُصنَّف)؛ أيُّ فشلٍ ⇒ خروجٌ غيرُ صفر فلا يبلغ المفتاحُ الاستنساخَ.
-#   clone    — يشغّل clone.sh (المفتاحُ في بيئة الخطوة وحدها) ثمّ يُملِّك الشجرةَ لـpcibuild في /home/pcibuild/src.
+#   clone    — يشغّل clone.sh (المفتاحُ في بيئة الخطوة وحدها) ثمّ حارسَ الاستثناءات بحسابه على الشجرة الأصليّة (Codex 6 §3: excl_guard)
+#              ثمّ يُملِّك الشجرةَ لـpcibuild في /home/pcibuild/src.
 #   build    — أطوارُ النوع قبل المحاكي (kinds.json) · emu — أطوارُه بعد إقلاع المحاكي **بمستخدم البناء** (emu_up · أ2).
 #              كلُّ طورٍ في جلسةٍ خاصّة (setsid) بمهلة min(ما بقي من الميزانية)، تُقتل كلُّها عند انقضائها (أ4)، ومخرجُه إلى مصرفٍ يملكه
 #              المشرفُ لا يُنتظر منه EOF.
@@ -60,9 +61,13 @@ BSRC="$BHOME/src"; BSTATE="$BHOME/state"; BDEV="$BHOME/device"
 if [ "$LOCAL" = 1 ]; then CTL_DIR="$BHOME/ctl"; else CTL_DIR="/var/lib/pci-ctl"; fi
 # 🚧 ملفّاتُ الاستثناءات بالتصميم التي يقرؤها البناءُ من مدخل التحكّم (يملكها root كالمدخل نفسِه) — الحارسُ وسكربتُ تهيئة Gradle والقائمة
 CTL_EXTRA=(forbidden_excludes.py forbidden_excludes.init.gradle forbidden_excludes.json)
+# Codex 6 §3: ملفُّ الأنماط الذي يقرؤه Gradle — يكتبه المشرفُ وحده (الحارسُ في do_clone ثمّ طورُ forbidden_excludes الموثوق) في مدخل التحكّم،
+#   ومرجعُه في PCI_STATE (700 للمشرف)؛ ومالكُ المدخل المعلَن لسكربت Gradle (root في الإنتاج · المستخدمُ نفسُه محلّيّاً).
+EXCL_RUN=forbidden_excludes.txt
+if [ "$LOCAL" = 1 ]; then CTL_OWNER="$(id -un)"; else CTL_OWNER=root; fi
 ADB_PORT=15037                     # أ2: منفذُ خادم ADB الخاصّ بمستخدم البناء (لا 5037 الافتراضيّ)
 NPROC_MAX=4096                     # أ4: سقفُ عمليّات مستخدم البناء وخيوطه (ulimit -u) — يخفّف fork bomb
-FIN_RESERVE=365                    # أ4: ثوانٍ تُحجز من الميزانية للتنظيف والعدّ والتشفير والفحص (حسابُها أدناه · الإصلاح السادس)
+FIN_RESERVE=370                    # أ4: ثوانٍ تُحجز من الميزانية للتنظيف والعدّ والتشفير والفحص (حسابُها أدناه · الإصلاح السادس)
 # أ4 (الإصلاح الخامس): سقوفُ خطوات finalize بعد التملّك وهامشُ القتل لكلٍّ منها — والتملّكُ يأخذ ما بقي من FIN_RESERVE بعدها.
 #   الإثبات: كلُّ خطوةٍ s تُعطى t_s = min(سقفها، FIN_END − الآن − المحجوزُ لما بعدها − FIN_KILL) وتنتهي حتماً قبل t_s + FIN_KILL
 #   (timeout --kill-after) ⇒ تنتهي قبل FIN_END − المحجوزُ لما بعدها؛ فآخرُها ينتهي قبل FIN_END، وFIN_END ≤ بدءُ finalize + FIN_RESERVE.
@@ -71,12 +76,13 @@ FIN_RESERVE=365                    # أ4: ثوانٍ تُحجز من الميز�
 #   كلُّ أمرٍ خارجيٍّ فيه (ps · pgrep · pkill · crontab · grep على /proc · id) تحت tmo/rtmo بمهلة FIN_CMD=3 ث وهامشِ قتل FIN_CMD_KILL=2:
 #     أمرٌ عاديّ ≤ 3 + 2 = 5 ث (P) · وأمرٌ بـsudo ≤ (3 + 2) + 2 = 7 ث (R: مهلةٌ داخل sudo تقتل الأمرَ نفسَه، ومهلةٌ خارجه تقتل sudo).
 #   foreign_emu_procs = id + ps ≤ 2P = 10 ث · do_cleanup = crontab (R) + 3 جولات × (قتلٌ R + انتظارٌ بساعة الحائط FIN_WAIT=5 + عدٌّ أخير P)
-#     = 7 + 3 × (7 + 5 + 5) = 58 ث ⇒ ما قبل التملّك ≤ 68 ث ≤ FIN_CAP_CLEAN=70.
-#   FIN_RESERVE = FIN_CAP_CLEAN 70 + أدنى التملّك FIN_OWN_MIN 60 + FIN_KILL 5 + 230 = 365 ث (كان 300 فلم يكن للتنظيف حدٌّ مكتوب؛
-#   والتملّكُ قيس حيّاً ثانيتين لشجرة 240 ألف ملفّ). وأسوأُ التنظيف لا يأكل من التملّك إلا ما زاد على حاجته الفعليّة.
+#     = 7 + 3 × (7 + 5 + 5) = 58 ث · وختمُ الاستثناءات (Codex 6 §3: excl_seal_final) أمرٌ واحدٌ تحت tmo = P = 5 ث
+#     ⇒ ما قبل التملّك ≤ 73 ث ≤ FIN_CAP_CLEAN=75.
+#   FIN_RESERVE = FIN_CAP_CLEAN 75 + أدنى التملّك FIN_OWN_MIN 60 + FIN_KILL 5 + 230 = 370 ث (كان 300 فلم يكن للتنظيف حدٌّ مكتوب، ثمّ 365
+#   قبل الختم؛ والتملّكُ قيس حيّاً ثانيتين لشجرة 240 ألف ملفّ). وأسوأُ التنظيف لا يأكل من التملّك إلا ما زاد على حاجته الفعليّة.
 FIN_KILL=5
 FIN_CAP_COUNTS=45; FIN_CAP_GUARD=45; FIN_CAP_ENC=100; FIN_CAP_CHECK=20
-FIN_CMD=3; FIN_CMD_KILL=2; FIN_WAIT=5; FIN_CAP_CLEAN=70; FIN_OWN_MIN=60
+FIN_CMD=3; FIN_CMD_KILL=2; FIN_WAIT=5; FIN_CAP_CLEAN=75; FIN_OWN_MIN=60
 OWN_TEST_SLEEP=""                  # 🧪 محلّيّاً وحده: يستبدل التملّكَ بـsleep لإثبات سلوك المهلة
 KINDS_ARGS=()
 PHASE_CAP=$((32 * 1024 * 1024))    # D18: سجلُّ الطور الواحد
@@ -135,6 +141,7 @@ make_benv(){
         CI=true TERM=dumb LANG=C.UTF-8 PYTHONIOENCODING=utf-8
         "GITHUB_WORKFLOW_REF=${GITHUB_WORKFLOW_REF}" "PCI_KIND=$PCI_KIND" "PCI_LEG=$PCI_LEG" "PCI_LINT=${PCI_LINT:-false}"
         "PCI_SRC=$BSRC" "PCI_BSTATE=$BSTATE" "PCI_BDEVICE=$BDEV" "PCI_WHISPER_REF=$wref" "PCI_RUN_TAG=$tag"
+        "PCI_CTL_OWNER=$CTL_OWNER"
         # أ2: خادمُ ADB والمحاكي بمستخدم البناء، بمنفذٍ ومجلّداتٍ خاصّةٍ به. ⛔ لا ADB_SERVER_SOCKET: adb يعدّ «tcp:127.0.0.1:…» مضيفاً
         #     بعيداً فيرفض تشغيلَ الخادم («cannot start server on remote host») — سببُ «الإقلاع ⛔» في التجربتين 42282855425 و42283857840.
         #     ANDROID_ADB_SERVER_PORT وحده يُقلع الخادمَ على localhost بالمنفذ الخاصّ.
@@ -174,9 +181,16 @@ ctl_intact(){
   local f
   cmp -s "$PCI_CTL/build.sh" "$CTL_DIR/build.sh" || return 1
   for f in "${CTL_EXTRA[@]}"; do cmp -s "$PCI_CTL/$f" "$CTL_DIR/$f" || return 1; done
+  # Codex 6 §3: ملفُّ الأنماط بعد تثبيته نسخةُ مرجع المشرف بعينها (لا رابط)؛ وقبل تثبيته (أو بلا طوره) لا وجودَ له أصلاً (لا زرع)
+  if [ -f "$PCI_STATE/excl_installed" ]; then
+    [ ! -L "$CTL_DIR/$EXCL_RUN" ] && cmp -s "$PCI_STATE/$EXCL_RUN" "$CTL_DIR/$EXCL_RUN" || return 1
+  elif [ -e "$CTL_DIR/$EXCL_RUN" ] || [ -L "$CTL_DIR/$EXCL_RUN" ]; then
+    return 1
+  fi
   [ "$ISO" = 1 ] || return 0
   root_chain_ok "$CTL_DIR/build.sh" || return 1
   for f in "${CTL_EXTRA[@]}"; do root_chain_ok "$CTL_DIR/$f" || return 1; done
+  if [ -f "$PCI_STATE/excl_installed" ]; then root_chain_ok "$CTL_DIR/$EXCL_RUN" || return 1; fi
 }
 
 # ───── prepare ─────
@@ -205,6 +219,7 @@ setup_builder(){ # ⛔ يجري قبل أوّل سطرٍ غيرِ موثوق —
     sudo -n install -o root -g root -m 0644 "$PCI_CTL/$ex" "$CTL_DIR/" || return "$(setup_fail ctl-copy)"
     root_chain_ok "$CTL_DIR/$ex" || return "$(setup_fail ctl-chain)"
   done
+  sudo -n rm -f "$CTL_DIR/$EXCL_RUN" || return "$(setup_fail ctl-copy)"   # Codex 6 §3: لا يثبّته إلا طورُ forbidden_excludes
   # أ3: لا مهامَّ مؤجّلةَ لمستخدم البناء (cron · at) تُحيي عمليّةً له بعد التنظيف
   printf 'pcibuild\n' | sudo -n tee -a /etc/cron.deny /etc/at.deny >/dev/null || return "$(setup_fail sched-deny)"
   # قراءةُ المشرف لشجرة البناء (تقاريرُ JUnit) بلا فتح البيت لغيره: ACL لمستخدم العدّاء وحدَه
@@ -347,6 +362,7 @@ do_prepare(){
       && install -m 0644 "$PCI_CTL/iso_probe.py" "$CTL_DIR/iso_probe.py" || return 1
     local ex
     for ex in "${CTL_EXTRA[@]}"; do install -m 0644 "$PCI_CTL/$ex" "$CTL_DIR/$ex" || return 1; done
+    rm -f "$CTL_DIR/$EXCL_RUN" || return 1
   fi
   # أ4: الميزانيةُ = مهلةُ الشوط في kinds.json من بدء المشرف؛ والأطوارُ تنتهي قبلها بـFIN_RESERVE فيبقى لـfinalize وقتُه.
   #     ووظيفةُ build في السير مهلتُها الميزانيةُ + هامشٌ (plan.py: job_timeout) فيسبق finalize دائماً إيقافَ GitHub.
@@ -378,6 +394,23 @@ do_prepare(){
 }
 
 # ───── clone ─────
+# 🚧 Codex 6 §3: حارسُ الاستثناءات بحساب العدّاء على الشجرة الأصليّة ($PCI_ROOT/src · 700 للمشرف) **قبل أن يملكها البناء** —
+#   فلا تجري قبله سطرٌ غيرُ موثوق ولا تصل إليه عمليّةٌ للبناء. بيئةٌ فارغة (env -i: لا مفتاحَ النشر الذي في بيئة خطوة الاستنساخ)،
+#   ومهلةٌ من الميزانية (≤ 120 ث). لا يُفشل الاستنساخ: رمزُه يُحفظ لطور forbidden_excludes الذي يرفض التثبيتَ بغير صفر.
+excl_guard(){
+  local dl g rc
+  rm -f "$PCI_STATE/$EXCL_RUN" "$PCI_STATE/excl_guard_rc" "$PCI_STATE/excl_installed"
+  dl="$(cat "$PCI_STATE/deadline" 2>/dev/null)"; [[ "$dl" =~ ^[0-9]+$ ]] || dl=0
+  g=$((dl - $(date +%s))); [ "$g" -gt 120 ] && g=120
+  if [ "$g" -lt 5 ]; then rc=124
+  else
+    timeout -k 5 "${g}s" env -i "PATH=$PATH" LANG=C.UTF-8 PYTHONIOENCODING=utf-8 python3 -I -S "$PCI_CTL/forbidden_excludes.py" \
+      verify --src "$PCI_ROOT/src" --kind "$PCI_KIND" --out "$PCI_STATE/$EXCL_RUN" 3>&-; rc=$?
+  fi
+  printf '%s\n' "$rc" > "$PCI_STATE/excl_guard_rc"
+  say "حارسُ الاستثناءات (بحساب المشرف قبل التسليم) = $rc"
+}
+
 move_src(){
   if [ "$ISO" = 1 ]; then
     sudo -n rm -rf "$BSRC" && sudo -n chown -R pcibuild:pcibuild "$PCI_ROOT/src" && sudo -n mv "$PCI_ROOT/src" "$BSRC"
@@ -398,6 +431,7 @@ do_clone(){
   timeout --kill-after=20s "${secs}s" bash "$PCI_CTL/clone.sh"; local rc=$?
   [ "$rc" = 0 ] || rc_set clone "$rc"
   ran_add clone
+  [ "$rc" = 0 ] && excl_guard
   if [ "$rc" = 0 ] && ! move_src; then say "⛔ تعذّر نقلُ الشجرة إلى بيت البناء"; rc_set clone 1; rc=1; fi
   if [ "$rc" = 0 ]; then pub "الاستنساخ: ✅"; else pub "الاستنساخ: ⛔"; fi
   return "$rc"
@@ -587,8 +621,29 @@ emu_probe(){ # $1 الثواني
   pub "مسبارُ المحاكي: ⛔ $ok/$n — الفاشل: $bad"; return 1
 }
 
+# 🚧 Codex 6 §3: الأنماطُ التي أجازها الحارسُ (do_clone) تُطابَق بايتاً ببايت بأنماط النوع في القائمة الموثوقة (نسخةُ المشرف)، ثمّ
+#   تُثبَّت في مدخل التحكّم: في الإنتاج root 0644 في شجرةٍ لـroot بآبائها (لا يكتبها البناء ولا يستبدلها)، وتُفحص سلسلتُها والمطابقة.
+#   والعلامةُ excl_installed تجعل ctl_intact وexcl_seal_final يفحصانه؛ وبلا تثبيتٍ يرفض build.sh تشغيلَ Gradle.
+excl_install(){
+  local grc n
+  grc="$(cat "$PCI_STATE/excl_guard_rc" 2>/dev/null)"
+  [ "$grc" = 0 ] || { say "⛔ حارسُ الاستثناءات لم يُجِز (الرمز ${grc:-لم يجرِ}) — لا تثبيت"; return 1; }
+  n="$(python3 -I -S "$PCI_CTL/forbidden_excludes.py" check --kind "$PCI_KIND" --patterns "$PCI_STATE/$EXCL_RUN")" \
+    || { say "${n:-⛔ تعذّرت المطابقة}"; return 1; }
+  if [ "$ISO" = 1 ]; then
+    sudo -n install -o root -g root -m 0644 "$PCI_STATE/$EXCL_RUN" "$CTL_DIR/$EXCL_RUN" || return 1
+    root_chain_ok "$CTL_DIR/$EXCL_RUN" || return 1
+  else
+    install -m 0644 "$PCI_STATE/$EXCL_RUN" "$CTL_DIR/$EXCL_RUN" || return 1
+  fi
+  [ ! -L "$CTL_DIR/$EXCL_RUN" ] && cmp -s "$PCI_STATE/$EXCL_RUN" "$CTL_DIR/$EXCL_RUN" || return 1
+  : > "$PCI_STATE/excl_installed"
+  say "الاستثناءات: $n نمطاً تطابق القائمةَ الموثوقة ومثبَّتةٌ في مدخل التحكّم"
+}
+
 run_runner_phase(){ # أوامرُ ثابتةٌ في المشرف — لا سكربتَ من الخاصّ بصلاحيّة
   case "$1" in
+    forbidden_excludes) ( excl_install ) ;;
     disk)      ( free_disk ) ;;
     kvm)       ( enable_kvm ) ;;
     sysimg)    ( emu_sysimg "$2" ) ;;
@@ -728,6 +783,22 @@ do_cleanup(){ # مستخدمٌ مؤقّتٌ على آلةٍ تُتلَف — ل�
   return "$rc"
 }
 
+# 🚧 Codex 6 §3: بعد زوال كلّ عمليّات البناء — الملفُّ الذي قرأه Gradle ما زال نسخةَ المرجع بعينها (عاديٌّ لا رابط) وسلسلتُه لـroot؛
+#   وإن لم يُثبَّت فلا وجودَ له. وإلا ⇒ طورُ forbidden_excludes فاشلٌ (125) فلا يُعلن عددُ المستثنى ولا ينجح الشوط. أمرٌ واحدٌ بمهلة FIN_CMD (P).
+excl_seal_final(){
+  local -a chain=()
+  if [ -f "$PCI_STATE/excl_installed" ]; then
+    [ "$ISO" = 1 ] && chain=(--chain-uid 0)
+    tmo "$FIN_CMD" python3 -I -S "$PCI_CTL/forbidden_excludes.py" sealed --file "$CTL_DIR/$EXCL_RUN" --ref "$PCI_STATE/$EXCL_RUN" \
+      ${chain[@]+"${chain[@]}"} && return 0
+  elif [ ! -e "$CTL_DIR/$EXCL_RUN" ] && [ ! -L "$CTL_DIR/$EXCL_RUN" ]; then
+    return 0
+  fi
+  rc_set forbidden_excludes 125
+  pub "الاستثناءات: ⛔ ملفُّ الأنماط في مدخل التحكّم تغيّر بعد التثبيت أو زُرع — لا يُعلن عددُ المستثنى"
+  return 1
+}
+
 # أ4 (الإصلاح الخامس): ثواني خطوةٍ من finalize بسقفها بعد حجز ما يليها وهامش قتلها (قد تكون ≤ 0 ⇒ لا تُشغَّل)
 fin_secs(){ local cap="$1" after="$2" t; t=$(( FIN_END - $(date +%s) - after - FIN_KILL )); [ "$t" -gt "$cap" ] && t="$cap"; echo "$t"; }
 
@@ -762,7 +833,8 @@ do_finalize(){
   # أ2: لا adb ولا محاكيَ بحسابٍ غيرِ مستخدم البناء بعد آخر طور
   fe="$(foreign_emu_procs)"
   if [ "$fe" != 0 ]; then pub "العزل: ⛔ بعد الأطوار: ADB/المحاكي بحسابٍ آخر: $fe"; ready=false; fi
-  do_cleanup || { ready=false; tree=0; }      # محدودٌ بنفسه (الإصلاح السادس): مع foreign_emu_procs ≤ FIN_CAP_CLEAN=70 ث
+  do_cleanup || { ready=false; tree=0; }      # محدودٌ بنفسه (الإصلاح السادس): مع foreign_emu_procs والختم ≤ FIN_CAP_CLEAN=75 ث
+  excl_seal_final || say "⛔ ختمُ الاستثناءات لم يثبت — طورُ forbidden_excludes = 125"
   if [ "$tree" = 1 ]; then
     own_secs=$(( FIN_END - $(date +%s) - FIN_AFTER_OWN - FIN_KILL ))
     OWN_END=$(( $(date +%s) + own_secs ))
