@@ -1,5 +1,5 @@
 {
-  "_comment": "أنواعُ مهامّ private-ci (v3) وأشواطُها. يقرؤها plan.py وcounts_schema.py وpublish.py وsupervise.sh؛ ولا يُقبل نوعٌ ولا شوطٌ ليس هنا. timeout بالدقائق لكلّ شوط. phases: قائمةُ الأطوار مرتّبةً (id · who: builder يجري بمستخدم pcibuild، runner أمرٌ ثابتٌ في المشرف · emu: يجري داخل خطوة المحاكي · optional: لا يُدرج إلا إن وُسم الشوطُ باسمه مثل lint:true، ولا يُعدّ إلزاميّاً). الأطوارُ غيرُ الاختياريّة (ومعها isolation وclone) إلزاميّةٌ في counts.json (ran). السياقُ public-ci/<النوع> للحالة الواحدة النهائيّة. أ2 (الإصلاح الرابع): كلُّ نوعٍ بمحاكٍ يبدأ بـsysimg (أمرٌ ثابتٌ بحساب العدّاء يثبّت صورةَ النظام في SDK المحصَّن قبل أيّ طورٍ غيرِ موثوق) ثمّ emu_up أوّلَ أطوار المحاكي: المحاكي وخادمُ ADB يُقلعان **بمستخدم البناء** بمنفذٍ خاصّ — لا إجراءَ محاكٍ بحساب العدّاء؛ ومعاملاتُ emu تُقرأ بأنماطٍ مغلقة (counts_schema emu). الإصلاح الخامس: التجربتان العامّتان dry-run-emu (مسبارُ المحاكي الحيّ: sysimg ثمّ kvm ثمّ emu_up بمستخدم البناء ثمّ emu_probe الموثوقُ بحساب العدّاء) وdry-run-stress (شجرةٌ كبيرةٌ لقياس مهلة التملّك) مصدرُهما هذا المستودعُ العامّ ولا تُطلبان إلا يدويّاً (workflow_dispatch). ⛔ لا recite-switch-emu (يقرأ أسراراً) ولا engine-models (يبقى في الخاص يدويّاً).",
+  "_comment": "أنواعُ مهامّ private-ci (v3) وأشواطُها. يقرؤها plan.py وcounts_schema.py وpublish.py وsupervise.sh؛ ولا يُقبل نوعٌ ولا شوطٌ ليس هنا. timeout بالدقائق لكلّ شوط. phases: قائمةُ الأطوار مرتّبةً (id · who: builder يجري بمستخدم pcibuild، runner أمرٌ ثابتٌ في المشرف · emu: يجري داخل خطوة المحاكي · optional: لا يُدرج إلا إن وُسم الشوطُ باسمه مثل lint:true، ولا يُعدّ إلزاميّاً). الأطوارُ غيرُ الاختياريّة (ومعها isolation وclone) إلزاميّةٌ في counts.json (ran). السياقُ public-ci/<النوع> للحالة الواحدة النهائيّة. أ2 (الإصلاح الرابع): كلُّ نوعٍ بمحاكٍ يبدأ بـsysimg (أمرٌ ثابتٌ بحساب العدّاء يثبّت صورةَ النظام في SDK المحصَّن قبل أيّ طورٍ غيرِ موثوق) ثمّ emu_up أوّلَ أطوار المحاكي: المحاكي وخادمُ ADB يُقلعان **بمستخدم البناء** بمنفذٍ خاصّ — لا إجراءَ محاكٍ بحساب العدّاء؛ ومعاملاتُ emu تُقرأ بأنماطٍ مغلقة (counts_schema emu). الإصلاح الخامس: التجربتان العامّتان dry-run-emu (مسبارُ المحاكي الحيّ: sysimg ثمّ kvm ثمّ emu_up بمستخدم البناء ثمّ emu_probe الموثوقُ بحساب العدّاء) وdry-run-stress (شجرةٌ كبيرةٌ لقياس مهلة التملّك) مصدرُهما هذا المستودعُ العامّ ولا تُطلبان إلا يدويّاً (workflow_dispatch). ⛔ لا recite-switch-emu (يقرأ أسراراً) ولا engine-models (يبقى في الخاص يدويّاً). التشغيلُ الواحد 2026-11-07: كلُّ نوعٍ خاصّ فيه sdk_pkgs قبل أيّ طورٍ بمستخدم البناء (أوّلَها، وبعد sysimg في أنواع المحاكي): أمرٌ ثابتٌ بحساب العدّاء يثبّت NDK وCMake في SDK المحصَّن — مستخدمُ البناء لا يكتب فيه فكان AGP يفشل بتثبيت NDK.",
   "dry-run": {
     "source": "public",
     "phases": [
@@ -33,6 +33,7 @@
   "app-test": {
     "source": "private",
     "phases": [
+      {"id": "sdk_pkgs", "who": "runner", "emu": false, "optional": false},
       {"id": "app_guide", "who": "builder", "emu": false, "optional": false},
       {"id": "no_blocking", "who": "builder", "emu": false, "optional": false},
       {"id": "back_handling", "who": "builder", "emu": false, "optional": false},
@@ -47,6 +48,7 @@
   "engine-test": {
     "source": "private",
     "phases": [
+      {"id": "sdk_pkgs", "who": "runner", "emu": false, "optional": false},
       {"id": "pip", "who": "builder", "emu": false, "optional": false},
       {"id": "fixture_selftest", "who": "builder", "emu": false, "optional": false},
       {"id": "fixture_audit", "who": "builder", "emu": false, "optional": false},
@@ -63,6 +65,7 @@
     "source": "private",
     "phases": [
       {"id": "sysimg", "who": "runner", "emu": false, "optional": false},
+      {"id": "sdk_pkgs", "who": "runner", "emu": false, "optional": false},
       {"id": "whisper", "who": "builder", "emu": false, "optional": false},
       {"id": "fatiha", "who": "builder", "emu": false, "optional": false},
       {"id": "disk", "who": "runner", "emu": false, "optional": false},
@@ -78,6 +81,7 @@
     "source": "private",
     "phases": [
       {"id": "sysimg", "who": "runner", "emu": false, "optional": false},
+      {"id": "sdk_pkgs", "who": "runner", "emu": false, "optional": false},
       {"id": "request", "who": "builder", "emu": false, "optional": false},
       {"id": "whisper", "who": "builder", "emu": false, "optional": false},
       {"id": "disk", "who": "runner", "emu": false, "optional": false},
@@ -93,6 +97,7 @@
     "source": "private",
     "phases": [
       {"id": "sysimg", "who": "runner", "emu": false, "optional": false},
+      {"id": "sdk_pkgs", "who": "runner", "emu": false, "optional": false},
       {"id": "whisper", "who": "builder", "emu": false, "optional": false},
       {"id": "gradle", "who": "builder", "emu": false, "optional": false},
       {"id": "bundletool", "who": "builder", "emu": false, "optional": false},
@@ -109,6 +114,7 @@
     "source": "private",
     "phases": [
       {"id": "sysimg", "who": "runner", "emu": false, "optional": false},
+      {"id": "sdk_pkgs", "who": "runner", "emu": false, "optional": false},
       {"id": "whisper", "who": "builder", "emu": false, "optional": false},
       {"id": "disk", "who": "runner", "emu": false, "optional": false},
       {"id": "kvm", "who": "runner", "emu": false, "optional": false},
@@ -124,6 +130,7 @@
     "source": "private",
     "phases": [
       {"id": "sysimg", "who": "runner", "emu": false, "optional": false},
+      {"id": "sdk_pkgs", "who": "runner", "emu": false, "optional": false},
       {"id": "whisper", "who": "builder", "emu": false, "optional": false},
       {"id": "fatiha", "who": "builder", "emu": false, "optional": false},
       {"id": "gradle", "who": "builder", "emu": false, "optional": false},

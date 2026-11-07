@@ -16,7 +16,7 @@ import counts_schema as cs  # noqa: E402
 
 SHA = "d" * 40
 KINDS = cs.load_kinds()
-APP_RAN = ["isolation", "clone", "app_guide", "no_blocking", "back_handling", "i18n_verify", "i18n_locale", "gradle"]
+APP_RAN = ["isolation", "clone", "sdk_pkgs", "app_guide", "no_blocking", "back_handling", "i18n_verify", "i18n_locale", "gradle"]
 
 
 def good(**kw):
@@ -174,10 +174,17 @@ class KindsTest(unittest.TestCase):
                 runner = {p["id"] for p in phases if p["who"] == "runner"}
                 if spec["source"] == "public":
                     self.assertTrue(runner <= {"sysimg", "disk", "kvm", "emu_probe"})
+                    self.assertNotIn("sdk_pkgs", ids)
                 else:
-                    self.assertTrue(runner <= {"sysimg", "disk", "kvm"})
+                    self.assertTrue(runner <= {"sysimg", "disk", "kvm", "sdk_pkgs"})
                     self.assertNotIn("emu_probe", ids)
                     self.assertNotIn("stress_tree", ids)
+                    # 🧱 التشغيل الواحد 2026-11-07: حزمُ SDK (NDK وCMake) بحساب العدّاء في كلّ نوعٍ خاصّ، وقبل أيّ طورٍ بمستخدم البناء
+                    #    (لا يسبقها إلا أمرٌ ثابتٌ بحساب العدّاء)
+                    self.assertIn("sdk_pkgs", ids)
+                    k = ids.index("sdk_pkgs")
+                    self.assertEqual(phases[k], {"id": "sdk_pkgs", "who": "runner", "emu": False, "optional": False})
+                    self.assertTrue(all(p["who"] == "runner" for p in phases[:k]), "طورٌ غيرُ موثوقٍ قبل sdk_pkgs")
                 if "emu_probe" in ids:
                     self.assertEqual(phases[-1], {"id": "emu_probe", "who": "runner", "emu": True, "optional": False})
                 # أ2: نوعٌ بمحاكٍ يبدأ بـsysimg (قبل أيّ طورٍ غيرِ موثوق) وأوّلُ أطوار المحاكي emu_up بمستخدم البناء
@@ -197,21 +204,21 @@ class KindsTest(unittest.TestCase):
 
     def test_known_orderings_match_v2(self):
         order = {k: [p["id"] for p in v["phases"]] for k, v in KINDS.items()}
-        self.assertEqual(order["app-test"], ["app_guide", "no_blocking", "back_handling", "i18n_verify", "i18n_locale", "gradle"])
-        self.assertEqual(order["tasmi-model-emulator-smoke"], ["sysimg", "whisper", "fatiha", "disk", "kvm", "emu_up", "emu"])
-        self.assertEqual(order["device-matrix"], ["sysimg", "whisper", "fatiha", "gradle", "lint", "disk", "kvm", "emu_up",
+        self.assertEqual(order["app-test"], ["sdk_pkgs", "app_guide", "no_blocking", "back_handling", "i18n_verify", "i18n_locale", "gradle"])
+        self.assertEqual(order["tasmi-model-emulator-smoke"], ["sysimg", "sdk_pkgs", "whisper", "fatiha", "disk", "kvm", "emu_up", "emu"])
+        self.assertEqual(order["device-matrix"], ["sysimg", "sdk_pkgs", "whisper", "fatiha", "gradle", "lint", "disk", "kvm", "emu_up",
                                                   "emu_smoke", "emu_tasmi"])
         self.assertEqual(order["dry-run"], ["unit"])
         self.assertEqual(order["dry-run-emu"], ["sysimg", "kvm", "emu_up", "emu_probe"])
         self.assertEqual(order["dry-run-stress"], ["stress_tree"])
-        self.assertEqual(order["engine-test"], ["pip", "fixture_selftest", "fixture_audit", "ffmpeg", "phoneme_gold", "jni", "gradle"])
+        self.assertEqual(order["engine-test"], ["sdk_pkgs", "pip", "fixture_selftest", "fixture_audit", "ffmpeg", "phoneme_gold", "jni", "gradle"])
 
     def test_phases_for_modes_and_lint(self):
         self.assertEqual(cs.phases_for(KINDS, "device-matrix", "a24-small-x86", "build"),
-                         [("sysimg", "runner"), ("whisper", "builder"), ("fatiha", "builder"), ("gradle", "builder"),
+                         [("sysimg", "runner"), ("sdk_pkgs", "runner"), ("whisper", "builder"), ("fatiha", "builder"), ("gradle", "builder"),
                           ("lint", "builder"), ("disk", "runner"), ("kvm", "runner")])
         self.assertEqual(cs.phases_for(KINDS, "device-matrix", "a26-phone", "build"),
-                         [("sysimg", "runner"), ("whisper", "builder"), ("fatiha", "builder"), ("gradle", "builder"),
+                         [("sysimg", "runner"), ("sdk_pkgs", "runner"), ("whisper", "builder"), ("fatiha", "builder"), ("gradle", "builder"),
                           ("disk", "runner"), ("kvm", "runner")])
         self.assertEqual(cs.phases_for(KINDS, "device-matrix", "a26-phone", "emu"),
                          [("emu_up", "builder"), ("emu_smoke", "builder"), ("emu_tasmi", "builder")])
