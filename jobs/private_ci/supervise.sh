@@ -60,13 +60,21 @@ BSRC="$BHOME/src"; BSTATE="$BHOME/state"; BDEV="$BHOME/device"
 if [ "$LOCAL" = 1 ]; then CTL_DIR="$BHOME/ctl"; else CTL_DIR="/var/lib/pci-ctl"; fi
 ADB_PORT=15037                     # أ2: منفذُ خادم ADB الخاصّ بمستخدم البناء (لا 5037 الافتراضيّ)
 NPROC_MAX=4096                     # أ4: سقفُ عمليّات مستخدم البناء وخيوطه (ulimit -u) — يخفّف fork bomb
-FIN_RESERVE=300                    # أ4: ثوانٍ تُحجز من الميزانية للتنظيف والعدّ والتشفير والفحص
+FIN_RESERVE=365                    # أ4: ثوانٍ تُحجز من الميزانية للتنظيف والعدّ والتشفير والفحص (حسابُها أدناه · الإصلاح السادس)
 # أ4 (الإصلاح الخامس): سقوفُ خطوات finalize بعد التملّك وهامشُ القتل لكلٍّ منها — والتملّكُ يأخذ ما بقي من FIN_RESERVE بعدها.
 #   الإثبات: كلُّ خطوةٍ s تُعطى t_s = min(سقفها، FIN_END − الآن − المحجوزُ لما بعدها − FIN_KILL) وتنتهي حتماً قبل t_s + FIN_KILL
 #   (timeout --kill-after) ⇒ تنتهي قبل FIN_END − المحجوزُ لما بعدها؛ فآخرُها ينتهي قبل FIN_END، وFIN_END ≤ بدءُ finalize + FIN_RESERVE.
-#   المحجوزُ بعد التملّك = (45 + 45 + 100 + 20) + 4 × 5 = 230 ث ⇒ يبقى للتنظيف (≤ 3 × 5 ث انتظاراً) والتملّك ≈ 70 ث من 300.
+#   المحجوزُ بعد التملّك = (45 + 45 + 100 + 20) + 4 × 5 = 230 ث.
+# الإصلاحُ السادس (Codex 15 · ملاحظة finalize): ما قبل التملّك (foreign_emu_procs ثمّ do_cleanup) صار بموعدٍ نهائيٍّ خارجيٍّ أيضاً:
+#   كلُّ أمرٍ خارجيٍّ فيه (ps · pgrep · pkill · crontab · grep على /proc · id) تحت tmo/rtmo بمهلة FIN_CMD=3 ث وهامشِ قتل FIN_CMD_KILL=2:
+#     أمرٌ عاديّ ≤ 3 + 2 = 5 ث (P) · وأمرٌ بـsudo ≤ (3 + 2) + 2 = 7 ث (R: مهلةٌ داخل sudo تقتل الأمرَ نفسَه، ومهلةٌ خارجه تقتل sudo).
+#   foreign_emu_procs = id + ps ≤ 2P = 10 ث · do_cleanup = crontab (R) + 3 جولات × (قتلٌ R + انتظارٌ بساعة الحائط FIN_WAIT=5 + عدٌّ أخير P)
+#     = 7 + 3 × (7 + 5 + 5) = 58 ث ⇒ ما قبل التملّك ≤ 68 ث ≤ FIN_CAP_CLEAN=70.
+#   FIN_RESERVE = FIN_CAP_CLEAN 70 + أدنى التملّك FIN_OWN_MIN 60 + FIN_KILL 5 + 230 = 365 ث (كان 300 فلم يكن للتنظيف حدٌّ مكتوب؛
+#   والتملّكُ قيس حيّاً ثانيتين لشجرة 240 ألف ملفّ). وأسوأُ التنظيف لا يأكل من التملّك إلا ما زاد على حاجته الفعليّة.
 FIN_KILL=5
 FIN_CAP_COUNTS=45; FIN_CAP_GUARD=45; FIN_CAP_ENC=100; FIN_CAP_CHECK=20
+FIN_CMD=3; FIN_CMD_KILL=2; FIN_WAIT=5; FIN_CAP_CLEAN=70; FIN_OWN_MIN=60
 OWN_TEST_SLEEP=""                  # 🧪 محلّيّاً وحده: يستبدل التملّكَ بـsleep لإثبات سلوك المهلة
 KINDS_ARGS=()
 PHASE_CAP=$((32 * 1024 * 1024))    # D18: سجلُّ الطور الواحد
@@ -89,6 +97,13 @@ exec 3>&1
 exec >>"$PCI_OUT/log.txt" 2>&1
 
 pub(){ printf '%s\n' "$*" >&3; }
+# الإصلاحُ السادس: موعدٌ نهائيٌّ لكلّ أمرٍ خارجيٍّ في التنظيف وعدِّ العمليّات — tmo عاديّ، وrtmo بصلاحية root
+#   (المهلةُ داخل sudo فتقتل الأمرَ نفسَه لا sudo وحده، ومهلةٌ خارجه تقتل sudo إن علق هو). الرمزُ 124/137 = انقضت.
+tmo(){ timeout -k "$FIN_CMD_KILL" "${1}s" "${@:2}"; }
+rtmo(){
+  if [ "$ISO" = 1 ]; then timeout -k "$FIN_CMD_KILL" "$(( $1 + FIN_CMD_KILL ))s" sudo -n timeout -k "$FIN_CMD_KILL" "${1}s" "${@:2}"
+  else tmo "$@"; fi
+}
 say(){ printf '▸ %s [%s] %s\n' "$(date -u +%H:%M:%S)" "$MODE" "$*"; }
 rc_set(){ printf '%s\n' "$2" > "$PCI_STATE/rc_$1"; }
 ran_add(){ printf '%s\n' "$1" >> "$PCI_STATE/ran.txt"; }
@@ -279,8 +294,8 @@ isolation_tests(){ # يضبط ISO_N وISO_OK؛ ما يجب أن يفشل وما 
 #     وتعذّرُ ps أو معرفةِ مستخدم البناء ⇒ «? ? 1» فلا يُقرأ صفراً.
 emu_procs(){
   local bu out
-  if [ "$ISO" = 1 ]; then bu="$(id -u pcibuild 2>/dev/null)" || { echo "? ? 1"; return; }; else bu="$(id -u)"; fi
-  out="$(ps -eo uid=,comm= 2>/dev/null)" || { echo "? ? 1"; return; }
+  if [ "$ISO" = 1 ]; then bu="$(tmo "$FIN_CMD" id -u pcibuild 2>/dev/null)" || { echo "? ? 1"; return; }; else bu="$(id -u)"; fi
+  out="$(tmo "$FIN_CMD" ps -eo uid=,comm= 2>/dev/null)" || { echo "? ? 1"; return; }   # انقضاءُ المهلة ⇒ «? ? 1» لا صفر
   awk -v bu="$bu" '$2 == "adb" && $1 == bu {a++} $2 ~ /^(emulator.*|qemu-system.*)$/ && $1 == bu {e++}
                    $2 ~ /^(adb|emulator.*|qemu-system.*)$/ && $1 != bu {f++} END {print a+0, e+0, f+0}' <<<"$out"
 }
@@ -406,6 +421,7 @@ emu_sysimg(){ # أ2: أمرٌ ثابتٌ بحساب العدّاء — أوّل�
 #      ⇒ deny --exists من مستخدم البناء = EACCES؛ ومن سلسلة ADB نفسِها: adb reverse إلى الوسيط ثمّ اتّصالٌ من داخل الجهاز ⇒
 #      لا تصل علامتُه، بينما يصل ضابطٌ موجبٌ (مقبسٌ لمستخدم البناء نفسِه عبر القناة نفسِها) فيثبت أنّ القناةَ تعمل.
 #   د. إعادةُ الجرد أثناء التشغيل وبعد قتل المحاكي: sock_probe (جردٌ ناقص = فشل) وعدُّ العمليّات.
+# الحكمُ (الإصلاح السادس): 19 فحصاً كلُّها لازمة — ومنها نجاحُ الضابط من داخل الجهاز؛ فغيابُه «غيرُ مقيس ⇒ فشل» لا نجاح.
 # ⛔ لا يُشغَّل adb هنا إلا بمستخدم البناء (badb ⇒ as_builder) — والمشرفُ لا يستدعي adb بحسابه أبداً (يفرضه test_shell).
 BROKER_MARK="PCI-BROKER-MARK"; CONTROL_MARK="PCI-CONTROL-MARK"
 # مستمعٌ صغير: يربط المقبسَ بالصيغة المطلوبة ويردّ على كلّ اتّصالٍ بعلامته ثمّ يغلق (المكتبةُ القياسيّة وحدها)
@@ -432,7 +448,7 @@ wait_file(){ local i; for i in $(seq 1 50); do
 ge1(){ [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ]; }
 
 emu_probe(){ # $1 الثواني
-  local secs="$1" n=0 ok=0 bad="" a e f l5 lp boot echo_r bdir broker sens grp cpid bpid spid tool t out ctl_ok=0 thru=0 sdk img u k v
+  local secs="$1" n=0 ok=0 bad="" a e f l5 lp boot echo_r bdir broker sens grp cpid bpid spid tool t out rc ctl_ok=0 ctl_why="" tmo_n=0 thru=0 sdk img u k v
   ep(){ n=$((n + 1)); if "$@"; then ok=$((ok + 1)); else bad="${bad:+$bad,}$n"; fi; }
   # تشخيصٌ علنيٌّ بأعدادٍ وجملٍ ثابتة (لا مسار): ما يحتاجه مستخدمُ البناء ليُقلع المحاكي — يُطبع ولا يُعدّ في الحكم
   sdk="$(readlink -f "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}")"; img="$sdk/system-images/android-${EMU[0]}/${EMU[1]}/${EMU[2]}"
@@ -473,25 +489,41 @@ emu_probe(){ # $1 الثواني
   pub "المحاكي: من مستخدم البناء — الوسيط $([ "$t" = 0 ] && echo 'مرفوضٌ بالصلاحية ✅' || echo ⛔) · الحسّاسُ الممثَّل $([ "$out" = 0 ] && echo 'مرفوضٌ بالصلاحية ✅' || echo ⛔) · مقبسُ Docker $([ "$l5" = 0 ] && echo ✅ || echo ⛔)"
   ep [ "$t" = 0 ]; ep [ "$out" = 0 ]; ep [ "$l5" = 0 ]
   # الضابطُ عبر ADB: مقبسٌ لمستخدم البناء في بيته (الخادمُ نفسُه يصله) — يثبت أنّ القناةَ وأداةَ الجهاز تعملان
+  # ⛔ الإصلاحُ السادس (مراجعة Codex 15 · الملاحظة 1): نجاحُ الضابط من داخل الجهاز **شرطٌ في الحكم** (ep [ "$ctl_ok" = 1 ]).
+  #    غيابُ الأداة · مستمعٌ لم يُنصت · رفضُ تسجيل reverse لمنفذه · انقضاءُ المهلة ⇒ «العبورُ غيرُ مقيس ⇒ فشل» — لا اكتفاءَ بالجهة المضيفة،
+  #    فـ`thru=0` بلا ضابطٍ ناجحٍ ليس دليلاً على شيء. (19 فحصاً في الحالة السليمة: الضابطُ الفحصُ 13 والعبورُ 14.)
+  ctl_why=""
   as_builder setsid timeout "$secs" python3 -I -S -c "$LISTENER" "$BHOME/pci-control.sock" 600 "$CONTROL_MARK" > /dev/null 2>&1 < /dev/null &
   cpid=$!
-  wait_file "$BHOME/pci-control.sock.ready" builder || pub "المحاكي: ⛔ لم يُنصت الضابط"
-  badb 30 reverse tcp:9998 "localfilesystem:$BHOME/pci-control.sock" >/dev/null 2>&1
+  wait_file "$BHOME/pci-control.sock.ready" builder || ctl_why="لم يُنصت مستمعُ الضابط"
+  if [ -z "$ctl_why" ]; then
+    badb 30 reverse tcp:9998 "localfilesystem:$BHOME/pci-control.sock" >/dev/null 2>&1; t=$?
+    if [ "$t" = 124 ] || [ "$t" = 137 ]; then ctl_why="انقضت مهلةُ تسجيل التحويل العكسيّ لمنفذ الضابط"
+    elif [ "$t" != 0 ]; then ctl_why="رُفض تسجيلُ التحويل العكسيّ (reverse) لمنفذ الضابط"; fi
+  fi
   badb 30 reverse tcp:9999 "localfilesystem:$broker" >/dev/null 2>&1; t=$?
   pub "المحاكي: تسجيلُ التحويل العكسيّ (reverse) إلى الوسيط — $([ "$t" = 0 ] && echo 'قُبل التسجيل (والحكمُ للاتّصال)' || echo 'رُفض التسجيل')"
-  tool=""
-  for t in "toybox nc" "nc" "busybox nc"; do
-    # stdin مفتوحٌ ثانيتين (لا EOF فوريّ يُنهي بعضَ النسخ قبل القراءة)؛ والمستمعُ يكتب علامتَه ويغلق فينتهي nc
-    out="$(badb 25 shell "sleep 2 | $t 127.0.0.1 9998" 2>/dev/null | tr -d '\r')"
-    if grep -qx "$CONTROL_MARK" <<<"$out"; then tool="$t"; ctl_ok=1; break; fi
-  done
-  if [ -n "$tool" ]; then
+  tool=""; tmo_n=0
+  if [ -z "$ctl_why" ]; then
+    for t in "toybox nc" "nc" "busybox nc"; do
+      # stdin مفتوحٌ ثانيتين (لا EOF فوريّ يُنهي بعضَ النسخ قبل القراءة)؛ والمستمعُ يكتب علامتَه ويغلق فينتهي nc
+      out="$(badb 25 shell "sleep 2 | $t 127.0.0.1 9998" 2>/dev/null | tr -d '\r')"; rc=$?
+      if grep -qx "$CONTROL_MARK" <<<"$out"; then tool="$t"; ctl_ok=1; break; fi
+      { [ "$rc" = 124 ] || [ "$rc" = 137 ]; } && tmo_n=$((tmo_n + 1))
+    done
+    if [ "$ctl_ok" != 1 ]; then
+      if [ "$tmo_n" = 3 ]; then ctl_why="انقضت مهلةُ الاتّصال بالضابط من داخل الجهاز (toybox nc · nc · busybox nc)"
+      else ctl_why="لا أداةَ اتّصالٍ داخل الجهاز وصلت بالضابط (toybox nc · nc · busybox nc)"; fi
+    fi
+  fi
+  if [ "$ctl_ok" = 1 ]; then
     out="$(badb 25 shell "sleep 2 | $tool 127.0.0.1 9999" 2>/dev/null | tr -d '\r')"
     grep -q "$BROKER_MARK" <<<"$out" && thru=1
     pub "المحاكي: العبورُ من داخل الجهاز عبر ADB ($tool) — الضابطُ وصل ✅ · علامةُ الوسيط $([ "$thru" = 0 ] && echo 'لم تصل ✅' || echo 'وصلت ⛔ جسرٌ قائم')"
   else
-    pub "المحاكي: ⚠ لا أداةَ اتّصالٍ داخل الجهاز وصلت بالضابط (toybox nc · nc · busybox nc) — يُكتفى بإثبات الجهة المضيفة أعلاه"
+    pub "المحاكي: ⛔ ${ctl_why:-الضابطُ لم يصل} — العبورُ غيرُ مقيس ⇒ فشل"
   fi
+  ep [ "$ctl_ok" = 1 ]
   ep [ "$thru" = 0 ]
   badb 30 reverse --remove-all >/dev/null 2>&1
   # د. الجردُ أثناء التشغيل (والوسيطان حيّان: يجب أن يُجردا ويُرفضا بالصلاحية)
@@ -528,15 +560,22 @@ run_runner_phase(){ # أوامرُ ثابتةٌ في المشرف — لا سك�
 alive(){ local st; st="$(sed -n 's/^.*) \(.\).*$/\1/p' "/proc/$1/stat" 2>/dev/null)"; [ -n "$st" ] && [ "$st" != Z ]; }
 
 # معرّفاتُ عمليّات البناء في الوضع المحلّيّ (لا مستخدمَ منفصلاً): كلُّ عمليّةٍ تحمل وسمَ هذا الشوط في بيئتها
+# الإصلاحُ السادس: grep على /proc بمهلة (قراءةُ environ لعمليّةٍ عالقةٍ قد تعلق)؛ وانقضاؤها ⇒ رمزٌ غيرُ صفر لا قائمةٌ فارغة
 tagged_pids(){
-  local tag; tag="$(cat "$PCI_STATE/run_tag" 2>/dev/null)"; [[ "$tag" =~ ^[0-9a-f]{32}$ ]] || return 0
-  grep -lsaF "PCI_RUN_TAG=$tag" /proc/[0-9]*/environ 2>/dev/null | cut -d/ -f3 | grep -vx "$$" || true
+  local tag out rc; tag="$(cat "$PCI_STATE/run_tag" 2>/dev/null)"; [[ "$tag" =~ ^[0-9a-f]{32}$ ]] || return 0
+  out="$(tmo "$FIN_CMD" grep -lsaF "PCI_RUN_TAG=$tag" /proc/[0-9]*/environ 2>/dev/null)"; rc=$?
+  case "$rc" in 0|1|2) ;; *) return 1 ;; esac      # 2: ملفٌّ زال أثناء القراءة (سباقٌ عاديّ) · 124/137: انقضت المهلة
+  [ -n "$out" ] || return 0
+  printf '%s\n' "$out" | cut -d/ -f3 | grep -vx "$$" || true
 }
-builder_count(){
-  if [ "$ISO" = 1 ]; then pgrep -u pcibuild 2>/dev/null | wc -l; else tagged_pids | wc -l; fi
+builder_count(){ # عددُ عمليّات مستخدم البناء؛ وتعذّرُ العدّ أو انقضاءُ مهلته ⇒ «?» (لا يُقرأ صفراً فلا تُفتح الشجرة)
+  local out rc
+  if [ "$ISO" = 1 ]; then out="$(tmo "$FIN_CMD" pgrep -u pcibuild 2>/dev/null)"; rc=$?; [ "$rc" = 0 ] || [ "$rc" = 1 ] || { echo "?"; return; }
+  else out="$(tagged_pids)" || { echo "?"; return; }; fi
+  if [ -n "$out" ]; then wc -l <<<"$out" | tr -d ' '; else echo 0; fi
 }
 kill_builder(){ # $1 الإشارة — كلُّ عمليّات مستخدم البناء (بالحساب لا بالجلسة: الهاربُ بـsetsid لا ينجو)
-  if [ "$ISO" = 1 ]; then sudo -n pkill "-$1" -u pcibuild >/dev/null 2>&1
+  if [ "$ISO" = 1 ]; then rtmo "$FIN_CMD" pkill "-$1" -u pcibuild >/dev/null 2>&1
   else local p; for p in $(tagged_pids); do kill "-$1" "$p" 2>/dev/null; done; fi
   return 0
 }
@@ -629,17 +668,19 @@ run_phases(){ # $1: build | emu
 do_cleanup(){ # مستخدمٌ مؤقّتٌ على آلةٍ تُتلَف — لا علاقةَ له بقاعدة «لا إنهاءَ بالجملة» على جهاز المالك
   # أ3: TERM ثمّ KILL (مرّتين) بانتظارٍ محدودٍ بعد كلٍّ ثمّ إعادةُ العدّ؛ وأيُّ عمليّةٍ باقيةٍ ⇒ فشلٌ يمنع قراءةَ الشجرة
   ran_add cleanup
-  local rc=0 n sig i
-  [ "$ISO" = 1 ] && sudo -n crontab -r -u pcibuild >/dev/null 2>&1
+  # الإصلاحُ السادس: كلُّ أمرٍ خارجيٍّ هنا بمهلة (tmo/rtmo)، والانتظارُ بساعة الحائط FIN_WAIT لا بعدد دورات ⇒ أسوأُه ≤ 58 ث (انظر FIN_CAP_CLEAN)
+  local rc=0 n="?" sig w
+  [ "$ISO" = 1 ] && rtmo "$FIN_CMD" crontab -r -u pcibuild >/dev/null 2>&1
   for sig in TERM KILL KILL; do
     [ "$SKIP_KILL" = 1 ] || kill_builder "$sig"
-    for i in $(seq 1 25); do [ "$(builder_count)" = 0 ] && break; sleep 0.2; done
-    [ "$(builder_count)" = 0 ] && break
+    w=$(( $(date +%s) + FIN_WAIT ))
+    while :; do n="$(builder_count)"; [ "$n" = 0 ] && break; [ "$(date +%s)" -ge "$w" ] && break; sleep 0.2; done
+    [ "$n" = 0 ] && break
   done
-  n="$(builder_count)"
   if [ "$n" != 0 ]; then
     rc=1; say "⛔ بقيت عمليّاتٌ لمستخدم البناء بعد التنظيف"
-    pub "التنظيف: ⛔ بقيت $n عمليّةً لمستخدم البناء — لا تُقرأ شجرتُه"
+    if [ "$n" = "?" ]; then pub "التنظيف: ⛔ تعذّر عدُّ عمليّات مستخدم البناء — لا تُقرأ شجرتُه"
+    else pub "التنظيف: ⛔ بقيت $n عمليّةً لمستخدم البناء — لا تُقرأ شجرتُه"; fi
   fi
   rc_set cleanup "$rc"
   return "$rc"
@@ -679,7 +720,7 @@ do_finalize(){
   # أ2: لا adb ولا محاكيَ بحسابٍ غيرِ مستخدم البناء بعد آخر طور
   fe="$(foreign_emu_procs)"
   if [ "$fe" != 0 ]; then pub "العزل: ⛔ بعد الأطوار: ADB/المحاكي بحسابٍ آخر: $fe"; ready=false; fi
-  do_cleanup || { ready=false; tree=0; }      # محدودٌ بنفسه: 3 جولاتٍ × 5 ث انتظاراً
+  do_cleanup || { ready=false; tree=0; }      # محدودٌ بنفسه (الإصلاح السادس): مع foreign_emu_procs ≤ FIN_CAP_CLEAN=70 ث
   if [ "$tree" = 1 ]; then
     own_secs=$(( FIN_END - $(date +%s) - FIN_AFTER_OWN - FIN_KILL ))
     OWN_END=$(( $(date +%s) + own_secs ))

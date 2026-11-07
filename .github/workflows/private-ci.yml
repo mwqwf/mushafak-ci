@@ -134,7 +134,10 @@ jobs:
         run: bash "$RUNNER_TEMP/pci/ctl/supervise.sh" clone
 
       # ⛔ من هنا شيفرةٌ غيرُ موثوقة (بمستخدم pcibuild)، ولا سرَّ في أيّ خطوة.
+      # الإصلاحُ السادس (Codex 15 · ملاحظة finalize): موعدٌ خارجيٌّ لكلّ خطوةٍ للمشرف. الأطوارُ تنتهي داخلياً عند deadline =
+      #     نهايةُ الميزانية − FIN_RESERVE (365 ث)؛ فمهلةُ الخطوة = الميزانيةُ كلُّها (leg.timeout دقيقة) تزيد على الأطوار بـFIN_RESERVE على الأقلّ.
       - name: البناء والاختبار (المخرجات إلى ملف)
+        timeout-minutes: ${{ matrix.leg.timeout }}
         if: steps.clone.outcome == 'success'
         run: bash "$RUNNER_TEMP/pci/ctl/supervise.sh" build
 
@@ -143,6 +146,7 @@ jobs:
       #     وفي التجربة emu_probe (النوع dry-run-emu · شوطُه has_emu) تجري هذه الخطوةُ نفسُها ثمّ طورُ المسبار الموثوق emu_probe.
       - name: المحاكي بمستخدم البناء (المخرجات إلى ملف)
         if: steps.clone.outcome == 'success' && matrix.leg.has_emu
+        timeout-minutes: ${{ matrix.leg.timeout }}
         run: bash "$RUNNER_TEMP/pci/ctl/supervise.sh" emu
 
       # 🧪 التجربةُ الذاتيّة وحدها (plan يفرض false لغير dry-run): سطرٌ مزروعٌ في السجلّ العلنيّ ⇒ يجب أن تسقط الحالة.
@@ -151,9 +155,12 @@ jobs:
         run: python3 -I -S "$RUNNER_TEMP/pci/ctl/guard.py" --emit-plant
 
       # D13: يقتل عمليّاتِ pcibuild ← يعدّ ← يشفّر ← يفحص ⇒ ready=true|false (المشرفُ وحده يكتب مجلّدَ الناتج).
+      # الإصلاحُ السادس: finalize ≤ FIN_RESERVE = 365 ث ≈ 6.1 د بالإثبات في supervise.sh (كلُّ أمرٍ فيه بمهلة) ⇒ 8 د = 6.1 + هامشُ ≈ 1.9 د
+      #     لبدء الصدفة وpython3؛ ومهلةُ الوظيفة (الميزانية + 6 د · plan.py JOB_MARGIN) تبقى فوقها.
       - name: العدّ والتشفير والفحص
         id: fin
         if: always()
+        timeout-minutes: 8
         run: bash "$RUNNER_TEMP/pci/ctl/supervise.sh" finalize
 
       - name: رفع الناتج
@@ -198,7 +205,8 @@ jobs:
           PCI_PLAN_OK: ${{ needs.plan.outputs.ok }}
           PCI_IN: ${{ runner.temp }}/in
           GH_TOKEN: ${{ github.token }}
-          PCI_R2_JSON: ${{ secrets.PRIVATE_CI_R2_JSON }}
+          # الإصلاحُ السادس (Codex 15 · الملاحظة 3): بيانةُ R2 للمصدر الخاصّ وحده — فالتجربةُ الجافّة بلا سرٍّ ولا أثرٍ خارجيّ (وpublish.py يُهملها فيها أيضاً).
+          PCI_R2_JSON: ${{ needs.plan.outputs.source == 'private' && secrets.PRIVATE_CI_R2_JSON || '' }}
           PCI_STATUS_TOKEN: ${{ needs.plan.outputs.source == 'private' && secrets.PCI_STATUS_TOKEN || '' }}
         run: python3 jobs/private_ci/publish.py
 

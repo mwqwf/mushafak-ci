@@ -11,6 +11,7 @@
   ٣. الحارس: سجلّاتُ وظائف build العلنيّة لهذه التشغيلة تُنزَّل بالواجهة وتُفحص بـguard.py **قبل** الحالة؛ والملخّصُ
      المولَّد من الأرقام يُفحص قبل نشره.
   ٤. الرفع: كلُّ سجلٍّ مشفَّرٍ صالحٍ إلى mushafak-ci-logs، ثمّ HEAD يثبت الطولَ وMD5 (upload_r2.upload_verified).
+     ⛔ والتجربةُ الجافّة (مصدرٌ عامّ) لا ترفع أبداً ولو وصلتها بيانة (الإصلاح السادس): skipped وسطرٌ صريح.
   ٥. الحكمُ المركَّب (compose) ثمّ **حالةٌ واحدةٌ نهائيّة** public-ci/<النوع>.
 
 الحكم: success فقط إن نجحت الاختبارات **و**الحارسُ نظيف **و**الرفعُ محقَّق **و**المخطّطُ صحيح.
@@ -45,7 +46,7 @@ REDIRECT_CODES = (301, 302, 303, 307, 308)
 # ───── الحكمُ المركَّب ─────
 def compose(plan_ok, legs, guard_state, upload_state, dry=False):
     """legs: قائمةُ قواميس {present, schema_ok, counts}. guard_state: clean|suspicious|unavailable.
-    upload_state: verified|failed|skipped. dry: التجربةُ الجافّة (dry-run) — D20-ج: يُقبل فيها skipped (غيابُ بيانة R2)
+    upload_state: verified|failed|skipped. dry: التجربةُ الجافّة (dry-run) — D20-ج: يُقبل فيها skipped (لا رفعَ فيها أصلاً)
     **لهذا النوع وحده**؛ ولأيّ نوعٍ خاصٍّ يبقى skipped تعذّراً. يُعيد (الحالة، رمزَ السبب)."""
     if not plan_ok:
         return "error", "plan"
@@ -254,25 +255,26 @@ def run(env, kinds=None, fetch_logs=fetch_build_logs, uploader=upload_r2.upload_
     # الرفع (كلُّ سجلٍّ مشفَّرٍ صالح، ولو فشلت اختباراتُه — فهو ما يُقرأ لمعرفة السبب)
     upload_state = "skipped"
     valid = [leg for leg in legs if leg["schema_ok"]]
-    if plan_ok and valid:
-        absent = not env.get("PCI_R2_JSON", "")
+    if plan_ok and dry:
+        # الإصلاحُ السادس (مراجعة Codex 15 · الملاحظة 3): التجربةُ الجافّة لا ترفع أبداً ولا تترك أثراً خارجيّاً — ولو وصلتها بيانة.
+        #     السيرُ لا يمرّر PCI_R2_JSON إلا لمصدرٍ خاصّ؛ فوصولُها هنا خطأُ إعدادٍ يُعلَن ويُهمل (لا يُقرأ ولا يُعدّ اشتباهاً).
+        if env.get("PCI_R2_JSON", ""):
+            print("الرفع: ⚠ بيانة R2 وصلت إلى تجربةٍ جافّة — أُهملت")
+        print("الرفع: تجربةٌ جافّة — لا رفعَ ولا أثرَ خارجيّ")
+    elif plan_ok and valid:
         try:
             creds = upload_r2.load_creds("PCI_R2_JSON", env)
         except upload_r2.UploadError as e:
             creds = None
             print(f"الرفع: ⛔ بيانةٌ مرفوضة ({e})")
-        if creds is None and dry and absent:
-            # D20-ج: التجربةُ الجافّة (المصدرُ عامّ) بلا أيّ سرّ — يُعدّ الرفعُ skipped ويقبله الحكمُ لهذا النوع وحده
-            upload_state = "skipped"
-            print("الرفع: ⚠ تجربةٌ جافّةٌ بلا بيانة R2 — متخطّى (لا يُقبل إلا لهذا النوع)")
-        elif creds is None:
+        if creds is None:
             upload_state = "failed"
             print("الرفع: ⛔ لا بيانةَ R2 مقبولة")
         else:
             upload_state = "verified"
             for leg in valid:
                 try:
-                    key = upload_r2.object_key("dryrun" if dry else "private", run_id, attempt, kind, leg["id"])
+                    key = upload_r2.object_key("private", run_id, attempt, kind, leg["id"])
                     uploader(creds, key, leg["log"])
                 except Exception as e:  # noqa: BLE001
                     upload_state = "failed"
