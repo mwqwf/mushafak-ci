@@ -42,6 +42,8 @@ PHASES = frozenset({
     "isolation", "cleanup",
     # أ2: صورةُ النظام (أمرٌ ثابتٌ بحساب العدّاء قبل أيّ طورٍ غيرِ موثوق) وإقلاعُ المحاكي وخادم ADB بمستخدم البناء
     "sysimg", "emu_up",
+    # 🧱 حزمُ SDK (NDK وCMake) بحساب العدّاء في SDK المحصَّن أوّلَ كلّ نوعٍ خاصّ (التشغيل الواحد 2026-11-07)
+    "sdk_pkgs",
     # الإصلاحُ الخامس: مسبارُ المحاكي الحيّ (طورٌ موثوقٌ بحساب العدّاء) والشجرةُ الكبيرة — في التجربتين العامّتين وحدهما
     "emu_probe", "stress_tree",
     # أطوارٌ تجريبيّةٌ للاختبار المحلّيّ وحده (kinds.json الإنتاجيّ لا يذكرها — يفرض ذلك test_counts_schema)
@@ -50,7 +52,7 @@ PHASES = frozenset({
 })
 # أطوارُ تجهيزٍ لا تُعدّ «اختباراً» حين لا تقرير JUnit (لكنّ فشلَها يُسقط الشوط).
 PREP = frozenset({"clone", "gradle", "pip", "ffmpeg", "whisper", "fatiha", "disk", "kvm", "bundletool", "request",
-                  "lint", "kind", "isolation", "cleanup", "sysimg", "emu_up"})
+                  "lint", "kind", "isolation", "cleanup", "sysimg", "emu_up", "sdk_pkgs"})
 # lint لا يُسقط الشوط (كما في device-matrix.yml الأصليّ: يُعدّ والحكمُ على المحاكيات).
 NON_FATAL = frozenset({"lint"})
 XML_DIRS = {

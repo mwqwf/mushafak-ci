@@ -413,6 +413,29 @@ emu_sysimg(){ # أ2: أمرٌ ثابتٌ بحساب العدّاء — أوّل�
   chmod -R go-w,a+rX "$sdk/system-images" "$sdk/emulator" "$sdk/platform-tools"   # ما ثُبّت يبقى للعدّاء بلا كتابةٍ لغيره ويُقرأ
 }
 
+# 🧱 حزمُ SDK التي يحتاجها البناءُ ولا يستطيع مستخدمُ البناء تثبيتَها: SDK محصَّنٌ للعدّاء وحده (D11) فحين يغيب NDK يحاول AGP تثبيتَه
+#    ويفشل «The SDK directory is not writable» (التشغيلُ الواحد 42388159267 · 2026-11-07 — بعد نجاح الاستنساخ وحرّاسه). فيثبّتهما المشرفُ
+#    بحساب العدّاء في طورٍ ثابتٍ (sdk_pkgs) في كلّ نوعٍ خاصّ قبل أيّ طورٍ بمستخدم البناء (أوّلَها، وبعد sysimg في أنواع المحاكي).
+#    ⛔ القائمةُ ثابتةٌ هنا (لا تُقرأ من الشجرة غيرِ الموثوقة)، والمشروعُ يثبّت الإصدارين نصّاً في engine/recitation/build.gradle.kts
+#    (ndkVersion · cmake.version = الافتراضيّان لـAGP 9.3.1) ويفحص test_kinds.py في الخاصّ تطابقَهما.
+SDK_PKGS=("ndk;28.2.13676358" "cmake;3.22.1")
+
+sdk_pkgs(){ # أمرٌ ثابتٌ بحساب العدّاء — قبل أيّ سطرٍ غيرِ موثوق في كلّ نوعٍ خاصّ — يثبّت NDK وCMake في SDK المحصَّن
+  local secs="$1" sdk sdkm pkg dir
+  sdk="$(readlink -f "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}")"; sdkm="$sdk/cmdline-tools/latest/bin/sdkmanager"
+  [ -x "$sdkm" ] || return 1
+  mkdir -p "$PCI_ROOT/tmp" || return 1
+  # كما في sysimg: التثبيتُ بـumask 022 (المشرفُ بـ077) ثمّ للعدّاء وحده الكتابة وللجميع القراءةُ والعبور
+  ( umask 022; SDKMANAGER_OPTS="-Djava.io.tmpdir=$PCI_ROOT/tmp" timeout "${secs}s" "$sdkm" --install \
+    "${SDK_PKGS[@]}" < <(yes 2>/dev/null) 3>&- ) || return 1
+  for pkg in "${SDK_PKGS[@]}"; do
+    dir="$sdk/${pkg//;//}"                                  # ndk;X ⇒ $sdk/ndk/X
+    [ -d "$dir" ] || { say "⛔ لم تُثبَّت الحزمة $pkg"; return 1; }
+    chmod -R go-w,a+rX "$dir" || return 1
+  done
+  say "حزمُ SDK مثبَّتة: ${SDK_PKGS[*]}"
+}
+
 # ───── أ2 (الإصلاح الخامس · قياسُ Codex 14): مسبارُ المحاكي الحيّ — طورٌ موثوقٌ بحساب العدّاء في التجربة dry-run-emu وحدها ─────
 # يجري بعد emu_up (المحاكي وخادمُ ADB بمستخدم البناء) ويُثبت علناً بأعدادٍ وجملٍ ثابتة (لا مسارَ ولا اسمَ مستخدمٍ غيرَ pcibuild/runner):
 #   أ. هويّةُ العمليّات أثناء التشغيل: adb والمحاكي/qemu بمستخدم البناء (≥1 لكلٍّ) · وبحسابٍ آخر 0 · ولا مُنصِتَ على 5037 الافتراضيّ.
@@ -556,6 +579,7 @@ run_runner_phase(){ # أوامرُ ثابتةٌ في المشرف — لا سك�
     disk)      ( free_disk ) ;;
     kvm)       ( enable_kvm ) ;;
     sysimg)    ( emu_sysimg "$2" ) ;;
+    sdk_pkgs)  ( sdk_pkgs "$2" ) ;;
     emu_probe) ( emu_probe "$2" ) ;;
     *)         return 2 ;;
   esac
