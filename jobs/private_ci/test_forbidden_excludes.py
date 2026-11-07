@@ -86,7 +86,7 @@ class ProductionListTest(unittest.TestCase):
                          "الشجرةُ الكاملة للمستودع الخاصّ غيرُ موجودة (مرآةُ العدّاء)")
     def test_production_list_verifies_against_the_real_private_tree(self):
         """حارسُ الانجراف في الخاصّ: لو غُيّر اسمُ اختبارٍ مدرجٍ أو حُذف ذكرُ المسار المحرَّم فيه يفشل هذا فوراً."""
-        pats, lines = fe.verify(ROOT, "app-test", fe.load_list())
+        pats, lines = fe.verify(ROOT, "app-test", fe.load_list(), absent=False)   # في الخاصّ المحرَّمُ موجودٌ أصلاً؛ فحصُ الغياب له اختبارُه
         self.assertEqual(len(pats), 3)
         self.assertEqual(len(lines), 3)
 
@@ -164,6 +164,53 @@ class VerifyTest(unittest.TestCase):
         self.assertIn("رُفض الاستثناء", r.stdout)
         self.assertIn("AyahLinkTest", r.stdout)
         self.assertFalse(os.path.exists(out))
+
+    # ───── تشديدٌ بأمر المراجعة: نطاقُ الدالّة لا الملفّ · وغيابُ المحرَّم فعلاً ─────
+    def two_method_class(self, fq, listed_body, neighbour_body, listed_first=True, class_level=""):
+        pkg, cls = fq.rsplit(".", 1)
+        m = SOURCES[fq][0]
+        a = f"    @Test\n    fun `{m}`() {{\n        {listed_body}\n    }}\n"
+        b = f"    @Test\n    fun `دالّة مجاورة`() {{\n        {neighbour_body}\n    }}\n"
+        put(self.src, class_rel(fq), f"package {pkg}\n\nclass {cls} {{\n{class_level}{a + b if listed_first else b + a}}}\n")
+
+    def test_negative_neighbour_method_mentions_forbidden_but_listed_does_not(self):
+        fq = "com.ali.rafiq.ui.AyahLinkTest"
+        for first in (True, False):
+            with self.subTest(listed_first=first):
+                self.two_method_class(fq, "assertTrue(true)", SOURCES[fq][1], listed_first=first)
+                with self.assertRaises(fe.Refusal) as cm:
+                    fe.verify(self.src, "app-test", self.entries)
+                self.assertIn("جسمُ الدالّة", str(cm.exception))
+
+    def test_negative_forbidden_only_in_class_level_val(self):
+        fq = "com.ali.rafiq.ui.AyahLinkTest"
+        self.two_method_class(fq, "assertTrue(true)", "assertTrue(true)", class_level='    private val site = File("store/site")\n')
+        with self.assertRaises(fe.Refusal):
+            fe.verify(self.src, "app-test", self.entries)
+
+    def test_positive_forbidden_in_listed_body_with_neighbour_methods_around(self):
+        fq = "com.ali.rafiq.ui.AyahLinkTest"
+        self.two_method_class(fq, SOURCES[fq][1], "assertTrue(true)", listed_first=False)
+        pats, _ = fe.verify(self.src, "app-test", self.entries)
+        self.assertEqual(len(pats), 3)
+
+    def test_negative_declared_forbidden_path_exists_in_clone(self):
+        for rel, kind in (("store/site/app-ads.txt", "file"), ("store/site", "dir"), ("cloud/worker/src/audio.ts", "file")):
+            with self.subTest(rel=rel):
+                p = os.path.join(self.src, *rel.split("/"))
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                open(p, "w").close()
+                es = [e for e in self.entries if e["forbidden_path"] == rel]
+                self.assertEqual(len(es), 1)
+                with self.assertRaises(fe.Refusal) as cm:
+                    fe.verify(self.src, "app-test", es)
+                self.assertIn("موجودٌ في الاستنساخ", str(cm.exception))
+                shutil.rmtree(os.path.join(self.src, rel.split("/")[0]))
+        # ورابطٌ رمزيّ معلَّقٌ بالاسم نفسه يُعدّ موجوداً (lexists)
+        os.makedirs(os.path.join(self.src, "store"))
+        os.symlink("/nonexistent", os.path.join(self.src, "store", "site"))
+        with self.assertRaises(fe.Refusal):
+            fe.verify(self.src, "app-test", [e for e in self.entries if e["forbidden_path"] == "store/site"])
 
     # ───── سالبٌ: صنفٌ أو دالّةٌ غيرُ موجودة ─────
     def test_negative_class_not_in_clone(self):

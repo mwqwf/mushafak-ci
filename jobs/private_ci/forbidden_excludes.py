@@ -11,8 +11,10 @@
 قواعدُ الحارس لكلّ عنصر:
   ١. الصنفُ موجودٌ بالضبط مرّةً في الاستنساخ: ملفٌّ باسمه (.kt/.java) تحت src/test في مجلّداتٍ تطابق حزمتَه، فيه سطرُ package وclass.
   ٢. الدالّةُ موجودةٌ في ذلك الملفّ (fun `الاسم` أو fun الاسم()).
-  ٣. المسارُ المحرَّم المعلَن يطابق FORBIDDEN_RX، **ويذكره الملفُّ حرفاً في نصٍّ بين علامتَي تنصيص** (معادلٌ له أو أصلٌ لمسارٍ فيه) —
-     فلا يكفي ذكرُه في تعليق.
+  ٣. المسارُ المحرَّم المعلَن يطابق FORBIDDEN_RX، **ويذكره جسمُ الدالّة المستثناة نفسِها حرفاً في نصٍّ بين علامتَي تنصيص** (معادلٌ له
+     أو أصلٌ لمسارٍ فيه) — لا الملفُّ ولا دالّةٌ مجاورة ولا حقلٌ على مستوى الصنف ولا تعليق. الجسمُ: من سطر إعلان الدالّة حتى ما قبل
+     أوّل سطرٍ تالٍ يبدأ بـ@Test أو بإعلان fun، أو نهايةِ الملفّ.
+  ٤. المسارُ المعلَن **غائبٌ فعلاً** من الاستنساخ (os.path.lexists) — وإن وُجد فالاختبارُ يجب أن يجري لا أن يُستثنى.
   ⛔ لا مطابقةَ بنجمة ولا استثناءَ صنفٍ كاملاً ولا رابطاً رمزيّاً ولا ملفّاً غيرَ عاديّ؛ ولا يُغيَّر الاختبارُ نفسُه.
 """
 import argparse
@@ -112,7 +114,25 @@ def normalized_literals(text):
     return out
 
 
-def check_entry(src, e):
+_BOUNDARY = re.compile(r"^\s*(@Test\b|(?:(?:private|internal|protected|public|override|open|suspend|inline)\s+)*fun\s|(?:public\s+|private\s+|protected\s+)?(?:static\s+)?void\s+\w+\s*\()")
+
+
+def method_body(text, method):
+    """جسمُ الدالّة: من سطر إعلانها حتى ما قبل أوّل سطرٍ تالٍ يبدأ بـ@Test أو إعلانِ fun (أو void في جافا)، أو نهاية الملفّ. None إن غابت."""
+    decl = re.compile(r"\bfun\s+`" + re.escape(method) + r"`|\bfun\s+" + re.escape(method) + r"\s*\(|\bvoid\s+" + re.escape(method) + r"\s*\(")
+    lines = text.split("\n")
+    for i, ln in enumerate(lines):
+        if decl.search(ln):
+            body = [ln]
+            for nxt in lines[i + 1:]:
+                if _BOUNDARY.match(nxt):
+                    break
+                body.append(nxt)
+            return "\n".join(body)
+    return None
+
+
+def check_entry(src, e, absent=True):
     """يرفع Refusal بسببٍ مكتوب إن لم يثبت الاستثناء."""
     fqcn, method, path = e["class"], e["method"], e["forbidden_path"]
     pkg, cls = fqcn.rsplit(".", 1)
@@ -121,29 +141,32 @@ def check_entry(src, e):
     if not re.search(r"(?m)^package\s+" + re.escape(pkg) + r"\s*;?\s*$", text) or \
             not re.search(r"\b(class|object)\s+" + re.escape(cls) + r"\b", text):
         raise Refusal("ملفُّ الصنف لا يعلن الحزمةَ أو الصنفَ المذكور")
-    if not (("fun `" + method + "`") in text or re.search(r"\bfun\s+" + re.escape(method) + r"\s*\(", text)
-            or re.search(r"\bvoid\s+" + re.escape(method) + r"\s*\(", text)):
+    if absent and os.path.lexists(os.path.join(src, *path.split("/"))):
+        raise Refusal("المسارُ المحرَّم موجودٌ في الاستنساخ — فالاختبارُ يجب أن يجري لا أن يُستثنى")
+    body = method_body(text, method)
+    if body is None:
         raise Refusal("دالّةٌ غيرُ موجودةٍ في ملفّ الصنف")
     ok = False
-    for lit in normalized_literals(text):
+    for lit in normalized_literals(body):
         if (lit == path or lit.startswith(path + "/")) and FORBIDDEN_RX.search(lit):
             ok = True
             break
     if not ok:
-        raise Refusal("ملفُّ الاختبار لا يذكر المسارَ المحرَّم في نصٍّ بين علامتَي تنصيص — لا استثناءَ بلا قراءةٍ فعليّةٍ لمحرَّم")
+        raise Refusal("جسمُ الدالّة لا يذكر المسارَ المحرَّم في نصٍّ بين علامتَي تنصيص — لا استثناءَ بلا قراءةٍ فعليّةٍ لمحرَّم داخل الدالّة نفسِها")
 
 
 def pattern_of(e):
     return f"{e['class']}.{e['method']}"
 
 
-def verify(src, kind, entries):
+def verify(src, kind, entries, absent=True):
+    """absent=False للاختبار وحده (شجرةُ الخاصّ الكاملة يوجد فيها المحرَّم أصلاً)؛ والحارسُ في CI يمرّ بـTrue دائماً."""
     """(الأنماط، أسطرُ التقرير). يرفع Refusal عند أوّل عنصرٍ لا يثبت (بسببه واسمِه)."""
     mine = [e for e in entries if e["kind"] == kind]
     patterns, lines = [], []
     for e in mine:
         try:
-            check_entry(src, e)
+            check_entry(src, e, absent)
         except Refusal as r:
             raise Refusal(f"{e['class']}#{e['method']}: {r}")
         patterns.append(pattern_of(e))
