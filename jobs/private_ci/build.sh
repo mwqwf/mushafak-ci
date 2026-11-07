@@ -152,18 +152,19 @@ emu_phase(){ # طورُ «emu» في الأنواع ذات المحاكي الو
   esac
 }
 
-# 🚧 الاستثناءاتُ بالتصميم (app-test وحده): الحارسُ وسكربتُ تهيئة Gradle والقائمةُ من مدخل التحكّم (يملكه root) لا من الشجرة الخاصّة.
+# 🚧 الاستثناءاتُ بالتصميم (app-test وحده) — مراجعة Codex السادسة §3: ⛔ لا حارسَ هنا ولا ملفَّ أنماطٍ يكتبه البناء.
+#    المشرفُ يشغّل الحارسَ بحسابه على الشجرة الأصليّة قبل أن يملكها البناء، ثمّ يثبّت الأنماطَ في مدخل التحكّم (يملكه root بآبائه)
+#    طوراً موثوقاً (forbidden_excludes) فلا يغيّرها طورٌ ولا wrapper؛ وسكربتُ Gradle يرفض الجريانَ ما لم يكن الملفُّ والقائمةُ للمالك
+#    المعلَن بلا كتابةٍ لغيره ولا رابطٍ رمزيّ، والأنماطُ هي أنماطَ النوع في القائمة الموثوقة حرفاً وترتيباً. ثمّ يختمه المشرفُ بعد زوال البناء.
 #    ⛔ لا @Ignore ولا assume ولا تغييرَ في الاختبارات: يستثني Gradle دوالَّ بأعيانها أجازها الحارسُ بعد أن ثبت أنّها تقرأ مساراً محرَّماً.
 CTL_SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-EXCLUDES_OUT="$PCI_BSTATE/forbidden_excludes.txt"
-forbidden_excludes(){
-  rm -f "$EXCLUDES_OUT"
-  python3 -I -S "$CTL_SELF/forbidden_excludes.py" verify --src "$PCI_SRC" --kind "$PCI_KIND" --out "$EXCLUDES_OUT"
-}
+EXCLUDES_FILE="$CTL_SELF/forbidden_excludes.txt"
 gradle_app_test(){
-  # بلا ملفّ أنماطٍ أجازه الحارسُ لا يجري Gradle أصلاً (ولا يُعاد الفحصُ بصمتٍ هنا: طورُ forbidden_excludes سبق وفشلُه يُسقط الشوط)
-  [ -f "$EXCLUDES_OUT" ] || { say "⛔ لا ملفَّ استثناءاتٍ أجازه الحارس — لا يجري Gradle"; return 1; }
-  gradle --init-script "$CTL_SELF/forbidden_excludes.init.gradle" "-Dpci.test.excludes=$EXCLUDES_OUT" \
+  # بلا ملفّ أنماطٍ ثبّته المشرفُ في مدخل التحكّم لا يجري Gradle أصلاً (ولا يُكتب بديلٌ هنا: البناءُ لا يملك المدخل)
+  [ -f "$EXCLUDES_FILE" ] && [ ! -L "$EXCLUDES_FILE" ] || { say "⛔ لا ملفَّ استثناءاتٍ ثبّته المشرف — لا يجري Gradle"; return 1; }
+  gradle --init-script "$CTL_SELF/forbidden_excludes.init.gradle" "-Dpci.test.excludes=$EXCLUDES_FILE" \
+    "-Dpci.test.excludes.list=$CTL_SELF/forbidden_excludes.json" "-Dpci.test.excludes.kind=$PCI_KIND" \
+    "-Dpci.test.excludes.owner=${PCI_CTL_OWNER:?}" \
     :app:compileDebugKotlin :app:testDebugUnitTest :core:quran:testDebugUnitTest :core:learning:test
 }
 
@@ -186,7 +187,6 @@ run_phase(){
     back_handling)    python3 tools/ux/test_back_handling.py ;;
     i18n_verify)      python3 tools/i18n/verify.py ;;
     i18n_locale)      python3 tools/i18n/check_locale.py --all ;;
-    forbidden_excludes) forbidden_excludes ;;
     gradle)           gradle_phase ;;
     pip)              python3 -m pip install --disable-pip-version-check --no-input -q "numpy==2.1.3" "soundfile==0.13.1" ;;
     fixture_selftest) python3 tools/tasmi_bench/fixture_audit.py --selftest ;;
@@ -214,6 +214,9 @@ run_phase(){
     selftest_env)     env | sort ;;
     selftest_tamper)  # أ1: يحاول تبديلَ مدخل التحكّم (في الإنتاج يملكه root فيفشل؛ ومحلّيّاً يكشفه المشرفُ قبل الطور التالي)
                       printf '\n# tampered\n' >> "$HOME/ctl/build.sh" ;;
+    selftest_excl_tamper) # Codex 6 §3: يحاول توسيعَ أنماط الاستثناء بعد تثبيتها (أو زرعَها إن غابت) — في الإنتاج يملكها root فيفشل؛
+                      #   ومحلّيّاً يكشفه المشرفُ قبل الطور التالي (126) وفي finalize (125) فلا يُعلن عددُ المستثنى
+                      printf 'com.evil.Planted.extra\n' >> "$HOME/ctl/forbidden_excludes.txt" ;;
     selftest_linger)  # أ3: عمليّةٌ تهرب من جلسة الطور وتبقى بعده — يجب أن يقتلها التنظيفُ أو يمنعَ قراءةَ الشجرة
                       setsid sleep 300 > /dev/null 2>&1 < /dev/null & true ;;
     selftest_hold)    # أ4: عمليّةٌ خلفيّةٌ تمسك مخرجَ الطور مفتوحاً بعد انتهائه — لا يُنتظر EOF منها

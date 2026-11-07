@@ -13,10 +13,11 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import counts_schema as cs  # noqa: E402
+import forbidden_excludes as fe  # noqa: E402
 
 SHA = "d" * 40
 KINDS = cs.load_kinds()
-APP_RAN = ["isolation", "clone", "sdk_pkgs", "app_guide", "no_blocking", "back_handling", "i18n_verify", "i18n_locale", "forbidden_excludes", "gradle"]
+APP_RAN = ["isolation", "clone", "sdk_pkgs", "forbidden_excludes", "app_guide", "no_blocking", "back_handling", "i18n_verify", "i18n_locale", "gradle"]
 
 
 def good(**kw):
@@ -176,7 +177,7 @@ class KindsTest(unittest.TestCase):
                     self.assertTrue(runner <= {"sysimg", "disk", "kvm", "emu_probe"})
                     self.assertNotIn("sdk_pkgs", ids)
                 else:
-                    self.assertTrue(runner <= {"sysimg", "disk", "kvm", "sdk_pkgs"})
+                    self.assertTrue(runner <= {"sysimg", "disk", "kvm", "sdk_pkgs", "forbidden_excludes"})
                     self.assertNotIn("emu_probe", ids)
                     self.assertNotIn("stress_tree", ids)
                     # 🧱 التشغيل الواحد 2026-11-07: حزمُ SDK (NDK وCMake) بحساب العدّاء في كلّ نوعٍ خاصّ، وقبل أيّ طورٍ بمستخدم البناء
@@ -185,6 +186,17 @@ class KindsTest(unittest.TestCase):
                     k = ids.index("sdk_pkgs")
                     self.assertEqual(phases[k], {"id": "sdk_pkgs", "who": "runner", "emu": False, "optional": False})
                     self.assertTrue(all(p["who"] == "runner" for p in phases[:k]), "طورٌ غيرُ موثوقٍ قبل sdk_pkgs")
+                # 🚧 Codex 6 §3: كلُّ نوعٍ له عناصرُ في قائمة الاستثناءات الموثوقة فيه forbidden_excludes **طوراً موثوقاً** (يثبّت أنماطَ الحارس
+                #    في مدخل التحكّم) قبل أيّ طورٍ بمستخدم البناء؛ ونوعٌ بلا عناصرَ لا يذكره (فلا يُعلن عددٌ لنوعٍ لا يستثني شيئاً)
+                if fe.entries_for(kind):
+                    self.assertEqual(spec["source"], "private")
+                    self.assertIn("forbidden_excludes", ids)
+                    k = ids.index("forbidden_excludes")
+                    self.assertEqual(phases[k], {"id": "forbidden_excludes", "who": "runner", "emu": False, "optional": False})
+                    self.assertTrue(all(p["who"] == "runner" for p in phases[:k]), "طورٌ غيرُ موثوقٍ قبل تثبيت الاستثناءات")
+                    self.assertIn("gradle", ids[k:])
+                else:
+                    self.assertNotIn("forbidden_excludes", ids)
                 if "emu_probe" in ids:
                     self.assertEqual(phases[-1], {"id": "emu_probe", "who": "runner", "emu": True, "optional": False})
                 # أ2: نوعٌ بمحاكٍ يبدأ بـsysimg (قبل أيّ طورٍ غيرِ موثوق) وأوّلُ أطوار المحاكي emu_up بمستخدم البناء
@@ -204,7 +216,7 @@ class KindsTest(unittest.TestCase):
 
     def test_known_orderings_match_v2(self):
         order = {k: [p["id"] for p in v["phases"]] for k, v in KINDS.items()}
-        self.assertEqual(order["app-test"], ["sdk_pkgs", "app_guide", "no_blocking", "back_handling", "i18n_verify", "i18n_locale", "forbidden_excludes", "gradle"])
+        self.assertEqual(order["app-test"], ["sdk_pkgs", "forbidden_excludes", "app_guide", "no_blocking", "back_handling", "i18n_verify", "i18n_locale", "gradle"])
         self.assertEqual(order["tasmi-model-emulator-smoke"], ["sysimg", "sdk_pkgs", "whisper", "fatiha", "disk", "kvm", "emu_up", "emu"])
         self.assertEqual(order["device-matrix"], ["sysimg", "sdk_pkgs", "whisper", "fatiha", "gradle", "lint", "disk", "kvm", "emu_up",
                                                   "emu_smoke", "emu_tasmi"])

@@ -2,7 +2,8 @@
 """🧪 حارسُ الاستثناءات بالتصميم (forbidden_excludes.py) وسكربتُ تهيئة Gradle المرافق له:
 قائمةُ الإنتاج صالحةٌ وتطابق FORBIDDEN_RX حرفاً مع clone.sh · موجبٌ (ثلاثُ دوالَّ تقرأ مساراً محرَّماً) · سالبٌ لدالّةٍ مدرجةٍ لا يذكر ملفُّها
 مساراً محرَّماً (ولو ذكره تعليقٌ فقط) · سالبٌ لصنفٍ أو دالّةٍ غيرِ موجودة · رفضُ نجمةٍ ومسارٍ غيرِ محرَّم وتكرارٍ وحقولٍ زائدة ·
-ملفٌّ رمزيٌّ أو صنفٌ في ملفّين أو في غير src/test · لا يبقى ملفُّ أنماطٍ بعد رفض · وسكربتُ Gradle يطبّق الأنماطَ فعلاً ويرفض ملفاً مفقوداً ونجمة."""
+ملفٌّ رمزيٌّ أو صنفٌ في ملفّين أو في غير src/test · لا يبقى ملفُّ أنماطٍ بعد رفض · ومطابقةُ المشرف (check) وختمُه (sealed) ·
+وسكربتُ Gradle يطبّق الأنماطَ فعلاً ويرفض ملفاً مفقوداً ونجمةً وأيَّ فرقٍ عن القائمة الموثوقة ومالكاً آخر وكتابةً لغيره ورابطاً (Codex 6 §3)."""
 import json
 import os
 import re
@@ -318,6 +319,114 @@ class ListValidationTest(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
 
 
+class CheckAndSealTest(unittest.TestCase):
+    """Codex 6 §3: المشرفُ يطابق ملفَّ الأنماط بالقائمة الموثوقة بايتاً ببايت (check) ويختم المثبَّتَ بعد زوال البناء (sealed)."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, True)
+        self.want = fe.canonical(fe.expected_patterns("app-test"))
+        self.f = put(self.d, "ex.txt", self.want)
+
+    def test_canonical_is_header_then_the_listed_patterns_in_order(self):
+        self.assertEqual(self.want.splitlines()[1:], [fe.pattern_of(e) for e in fe.entries_for("app-test")])
+        self.assertTrue(self.want.startswith("#"))
+        self.assertEqual(fe.check_patterns(self.f, "app-test"), 3)
+        r = cli("check", "--kind", "app-test", "--patterns", self.f)
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, "3"))
+
+    def test_check_refuses_any_difference_from_the_trusted_list(self):
+        pats = fe.expected_patterns("app-test")
+        cases = {
+            "extra": fe.canonical(pats + ["com.evil.X.y"]),
+            "missing": fe.canonical(pats[:-1]),
+            "reordered": fe.canonical(list(reversed(pats))),
+            "wildcard": fe.canonical(pats[:-1] + ["com.ali.rafiq.*"]),
+            "other-kind": fe.canonical(fe.expected_patterns("engine-test")),
+            "no-header": "".join(x + "\n" for x in pats),
+            "trailing-space": fe.canonical(pats).replace("\n", " \n", 2),
+            "crlf": fe.canonical(pats).replace("\n", "\r\n"),
+            "extra-comment": fe.canonical(pats) + "# سطرٌ زائد\n",
+        }
+        for name, text in cases.items():
+            with self.subTest(name):
+                put(self.d, "bad.txt", text)
+                with self.assertRaises(fe.Refusal):
+                    fe.check_patterns(os.path.join(self.d, "bad.txt"), "app-test")
+                r = cli("check", "--kind", "app-test", "--patterns", os.path.join(self.d, "bad.txt"))
+                self.assertEqual(r.returncode, 1)
+                self.assertIn("forbidden_excludes: ⛔", r.stdout)
+
+    def test_check_refuses_symlink_hardlink_and_missing(self):
+        link = os.path.join(self.d, "link.txt"); os.symlink(self.f, link)
+        hard = os.path.join(self.d, "hard.txt"); os.link(self.f, hard)
+        for name, path in (("symlink", link), ("hardlink", hard), ("missing", os.path.join(self.d, "nope.txt"))):
+            with self.subTest(name):
+                with self.assertRaises(fe.Refusal):
+                    fe.check_patterns(path, "app-test")
+
+    def test_sealed_accepts_an_identical_copy_and_refuses_a_change(self):
+        ref = put(self.d, "ref.txt", self.want)
+        fe.sealed(self.f, ref)
+        self.assertEqual(cli("sealed", "--file", self.f, "--ref", ref).returncode, 0)
+        with open(self.f, "a", encoding="utf-8") as f:
+            f.write("com.evil.X.y\n")
+        with self.assertRaises(fe.Refusal):
+            fe.sealed(self.f, ref)
+        r = cli("sealed", "--file", self.f, "--ref", ref)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("forbidden_excludes: ⛔", r.stdout)
+        os.remove(self.f); os.symlink(ref, self.f)                       # رابطٌ إلى نسخةٍ مطابقة: مرفوض
+        with self.assertRaises(fe.Refusal):
+            fe.sealed(self.f, ref)
+
+    def test_sealed_with_chain_uid_requires_owner_and_no_group_or_other_write(self):
+        ref = put(self.d, "ref.txt", self.want)
+        sub = os.path.join(self.d, "ctl"); os.makedirs(sub); os.chmod(sub, 0o755)
+        f = put(self.d, "ctl/ex.txt", self.want); os.chmod(f, 0o644)
+        me = os.getuid()
+        # آباءُ المجلّد المؤقّت قد لا تكون للمستخدم نفسِه (‏/tmp لـroot بـ1777) ⇒ تُفحص السلسلةُ بدالّتها مباشرةً على مكوّنٍ نملكه
+        self.assertFalse(fe.chain_ok("relative/ex.txt", me))
+        self.assertFalse(fe.chain_ok(os.path.join(sub, "..", "ctl", "ex.txt"), me))
+        if not fe.chain_ok(f, me):
+            # السلسلةُ من الجذر لا تكون كلُّها لنا في بيئة الاختبار: يكفي أن نُثبت أنّ الختمَ يرفض حين تُطلب السلسلة
+            with self.assertRaises(fe.Refusal):
+                fe.sealed(f, ref, chain_uid=me)
+        else:
+            fe.sealed(f, ref, chain_uid=me)
+        os.chmod(sub, 0o775)
+        self.assertFalse(fe.chain_ok(f, me)); os.chmod(sub, 0o755)
+        os.chmod(f, 0o646)
+        self.assertFalse(fe.chain_ok(f, me)); os.chmod(f, 0o644)
+        self.assertFalse(fe.chain_ok(f, me + 1))                         # مالكٌ آخر
+        link = os.path.join(self.d, "lnk"); os.symlink(sub, link)
+        self.assertFalse(fe.chain_ok(os.path.join(link, "ex.txt"), me))  # رابطٌ في الآباء
+
+    @unittest.skipUnless(hasattr(os, "geteuid") and os.geteuid() == 0, "يحتاج root لسلسلةٍ من الجذر")
+    def test_chain_ok_from_root_for_a_root_owned_tree(self):
+        parent = next((p for p in ("/var/lib", "/root", "/opt") if os.path.isdir(p) and os.stat(p).st_uid == 0
+                       and not os.stat(p).st_mode & 0o022), None)
+        if parent is None:
+            self.skipTest("لا مجلّدَ نظاميٌّ لـroot بلا كتابة")
+        base = tempfile.mkdtemp(prefix="pci-seal-test-", dir=parent)
+        self.addCleanup(shutil.rmtree, base, True)
+        os.chmod(base, 0o755)
+        f = os.path.join(base, "ex.txt")
+        with open(f, "w", encoding="utf-8") as fh:
+            fh.write(self.want)
+        os.chmod(f, 0o644)
+        if not fe.chain_ok(f, 0):
+            self.skipTest("آباءُ المجلّد المؤقّت ليست لـroot بلا كتابة (بيئةُ الاختبار)")
+        ref = put(self.d, "ref.txt", self.want)
+        fe.sealed(f, ref, chain_uid=0)
+        os.chown(f, 65534, -1)
+        with self.assertRaises(fe.Refusal):
+            fe.sealed(f, ref, chain_uid=0)
+
+
+OWNER = __import__("pwd").getpwuid(os.getuid()).pw_name
+
+
 class GradleInitScriptTest(unittest.TestCase):
     def test_static_shape_no_ignore_no_assume_and_filter_only(self):
         with open(INIT, encoding="utf-8") as f:
@@ -325,38 +434,96 @@ class GradleInitScriptTest(unittest.TestCase):
         code = "\n".join(ln for ln in body.splitlines() if not ln.lstrip().startswith("//"))
         self.assertIn("excludeTestsMatching", code)
         self.assertIn("System.getProperty('pci.test.excludes')", code)
+        # Codex 6 §3: ربطُ ما يقرؤه Gradle بالقائمة الموثوقة ومالكِ مدخل التحكّم — والمقارنةُ حرفاً وترتيباً
+        for prop in ("pci.test.excludes.list", "pci.test.excludes.kind", "pci.test.excludes.owner"):
+            self.assertIn(f"System.getProperty('{prop}')", code)
+        self.assertIn("LinkOption.NOFOLLOW_LINKS", code)
+        self.assertIn("if (patterns != expected)", code)
         for bad in ("@Ignore", "assume", "includeTestsMatching", "enabled = false", "onlyIf"):
             self.assertNotIn(bad, code)
 
-    @unittest.skipUnless(shutil.which("gradle"), "لا gradle في هذه البيئة")
-    def test_gradle_applies_exactly_the_listed_patterns(self):
-        with tempfile.TemporaryDirectory() as d:
-            put(d, "settings.gradle", "")
-            put(d, "build.gradle", "tasks.register('t', Test)\n"
-                                   "tasks.register('show') { doLast { println 'EX=' + tasks.t.filter.excludePatterns.toList().sort() } }\n")
-            put(d, "ex.txt", "# تعليق\ncom.a.B.بصمات assetlinks موجودة\ncom.a.C.app-ads txt\n")
-            env = dict(os.environ, GRADLE_USER_HOME=os.path.join(d, "guh"))
-            r = subprocess.run(["gradle", "--offline", "--no-daemon", "-q", "--init-script", INIT,
-                                f"-Dpci.test.excludes={os.path.join(d, 'ex.txt')}", "-p", d, "show"],
-                               capture_output=True, text=True, timeout=240, env=env)
-            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-            self.assertIn("EX=[com.a.B.بصمات assetlinks موجودة, com.a.C.app-ads txt]", r.stdout)
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, True)
+        os.chmod(self.d, 0o755)
+        put(self.d, "proj/settings.gradle", "")
+        put(self.d, "proj/build.gradle", "tasks.register('t', Test)\n"
+                                         "tasks.register('show') { doLast { println 'EX=' + tasks.t.filter.excludePatterns.toList().sort() } }\n")
+        self.ctl = os.path.join(self.d, "ctl")
+        os.makedirs(self.ctl); os.chmod(self.ctl, 0o755)
+        self.good = "# تعليق\ncom.a.B.بصمات assetlinks موجودة\ncom.a.C.app-ads txt\n"
+        self.ex = put(self.d, "ctl/ex.txt", self.good); os.chmod(self.ex, 0o644)
+        self.lst = os.path.join(self.ctl, "list.json")
+        with open(self.lst, "w", encoding="utf-8") as f:
+            json.dump({"excludes": [entry("com.a.B", "بصمات assetlinks موجودة", "store/site"),
+                                    entry("com.a.C", "app-ads txt", "store/site/app-ads.txt"),
+                                    entry("com.a.D", "m", "cloud/x", kind="engine-test")]}, f, ensure_ascii=False)
+        os.chmod(self.lst, 0o644)
+
+    def gradle(self, *props):
+        env = dict(os.environ, GRADLE_USER_HOME=os.path.join(self.d, "guh"))
+        return subprocess.run(["gradle", "--offline", "--no-daemon", "-q", "--init-script", INIT, *props,
+                               "-p", os.path.join(self.d, "proj"), "show"], capture_output=True, text=True, timeout=240, env=env)
+
+    def props(self, ex=None, lst=None, kind="app-test", owner=OWNER):
+        return [f"-Dpci.test.excludes={ex or self.ex}", f"-Dpci.test.excludes.list={lst or self.lst}",
+                f"-Dpci.test.excludes.kind={kind}", f"-Dpci.test.excludes.owner={owner}"]
+
+    def refused(self, r, why):
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("EX=", r.stdout)
+        self.assertIn("pci:", r.stderr)
+        self.assertIn(why, r.stderr)
 
     @unittest.skipUnless(shutil.which("gradle"), "لا gradle في هذه البيئة")
-    def test_gradle_refuses_missing_file_and_wildcard(self):
-        with tempfile.TemporaryDirectory() as d:
-            put(d, "settings.gradle", "")
-            put(d, "build.gradle", "tasks.register('show') { doLast { println 'RAN' } }\n")
-            put(d, "wild.txt", "com.a.B.*\n")
-            env = dict(os.environ, GRADLE_USER_HOME=os.path.join(d, "guh"))
-            for name, prop in (("missing", os.path.join(d, "nope.txt")), ("wild", os.path.join(d, "wild.txt"))):
-                with self.subTest(name):
-                    r = subprocess.run(["gradle", "--offline", "--no-daemon", "-q", "--init-script", INIT,
-                                        f"-Dpci.test.excludes={prop}", "-p", d, "show"],
-                                       capture_output=True, text=True, timeout=240, env=env)
-                    self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
-                    self.assertNotIn("RAN", r.stdout)
-                    self.assertIn("pci:", r.stderr)
+    def test_gradle_applies_exactly_the_listed_patterns(self):
+        r = self.gradle(*self.props())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("EX=[com.a.B.بصمات assetlinks موجودة, com.a.C.app-ads txt]", r.stdout)
+
+    @unittest.skipUnless(shutil.which("gradle"), "لا gradle في هذه البيئة")
+    def test_gradle_accepts_the_supervisor_canonical_file_for_the_production_list(self):
+        """الربطُ بين الطرفين: ما يكتبه المشرفُ (canonical) للقائمة الحقيقيّة يقبله سكربتُ Gradle ويطبّق أنماطَها الثلاثة بأعيانها."""
+        lst = os.path.join(self.ctl, "prod.json")
+        shutil.copyfile(os.path.join(HERE, "forbidden_excludes.json"), lst); os.chmod(lst, 0o644)
+        with open(self.ex, "w", encoding="utf-8") as f:
+            f.write(fe.canonical(fe.expected_patterns("app-test")))
+        r = self.gradle(*self.props(lst=lst))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("EX=" + str(sorted(fe.expected_patterns("app-test"))).replace("'", ""), r.stdout)
+
+    @unittest.skipUnless(shutil.which("gradle"), "لا gradle في هذه البيئة")
+    def test_gradle_refuses_patterns_that_differ_from_the_trusted_list(self):
+        """العبثُ بعد الحارس: سطرٌ زائد · ترتيبٌ مقلوب · نوعٌ آخر · نجمة — لا يجري Gradle بأيٍّ منها."""
+        cases = (("extra", self.good + "com.a.D.m\n", "app-test", "لا تطابق القائمةَ الموثوقة"),
+                 ("reordered", "# تعليق\ncom.a.C.app-ads txt\ncom.a.B.بصمات assetlinks موجودة\n", "app-test", "لا تطابق القائمةَ الموثوقة"),
+                 ("other-kind", self.good, "engine-test", "لا تطابق القائمةَ الموثوقة"),
+                 ("wildcard", "com.a.B.*\n", "app-test", "نمطُ استثناءٍ غيرُ مقبول"))
+        for name, text, kind, why in cases:
+            with self.subTest(name):
+                with open(self.ex, "w", encoding="utf-8") as f:
+                    f.write(text)
+                self.refused(self.gradle(*self.props(kind=kind)), why)
+
+    @unittest.skipUnless(shutil.which("gradle"), "لا gradle في هذه البيئة")
+    def test_gradle_refuses_wrong_owner_writable_symlink_missing_and_unbound(self):
+        link = os.path.join(self.ctl, "link.txt"); os.symlink(self.ex, link)
+        with self.subTest("owner"):
+            self.refused(self.gradle(*self.props(owner="nobody-pci")), "لغير مالكها المعلَن")
+        with self.subTest("group-writable-file"):
+            os.chmod(self.ex, 0o664)
+            self.refused(self.gradle(*self.props()), "قابلةٌ للكتابة لغير مالكها")
+            os.chmod(self.ex, 0o644)
+        with self.subTest("other-writable-dir"):
+            os.chmod(self.ctl, 0o757)
+            self.refused(self.gradle(*self.props()), "قابلةٌ للكتابة لغير مالكها")
+            os.chmod(self.ctl, 0o755)
+        with self.subTest("symlink"):
+            self.refused(self.gradle(*self.props(ex=link)), "ليس ملفّاً عاديّاً")
+        with self.subTest("missing"):
+            self.refused(self.gradle(*self.props(ex=os.path.join(self.ctl, "nope.txt"))), "ليس ملفّاً عاديّاً")
+        with self.subTest("unbound"):
+            self.refused(self.gradle(f"-Dpci.test.excludes={self.ex}"), "لا يجري Gradle بلا ربطٍ بالقائمة الموثوقة")
 
 
 if __name__ == "__main__":

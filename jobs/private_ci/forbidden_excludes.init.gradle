@@ -1,21 +1,61 @@
 // 🚧 سكربتُ تهيئة Gradle يملكه العدّاء العامّ (يُمرَّر بـ--init-script من مدخل التحكّم لا من الشجرة الخاصّة).
-// يستثني من كلّ مهمّة Test دوالَّ بأعيانها (الصنف.الدالّة) سبق أن أجازها forbidden_excludes.py بعد أن ثبت أنّها تقرأ
-// مساراً محرَّماً بالتصميم لا يُستنسخ إلى العدّاء. الأنماطُ تصل في ملفٍّ (‎-Dpci.test.excludes=<ملف>) يكتبه الحارسُ في طورٍ سابق.
+// يستثني من كلّ مهمّة Test دوالَّ بأعيانها (الصنف.الدالّة) أجازها forbidden_excludes.py بعد أن ثبت أنّها تقرأ مساراً محرَّماً
+// بالتصميم لا يُستنسخ إلى العدّاء.
+// ⛔ مراجعة Codex السادسة (§3): الأنماطُ لا تُقبل لصحّتها النحويّة وحدها. يُفتح ملفُّها والقائمةُ الموثوقة من مدخل التحكّم
+//    (يملكهما المالكُ المعلَن ‎-Dpci.test.excludes.owner — root في الإنتاج — بلا رابطٍ رمزيّ ولا كتابةٍ لغيره في الملفّ ولا في أبيه)،
+//    ثمّ يجب أن تساوي الأنماطُ **حرفاً وترتيباً** ما تشتقّه القائمةُ الموثوقة للنوع (‎-Dpci.test.excludes.kind)؛ وإلا فلا يجري Gradle.
+//    فالعددُ الذي ينشره الناشرُ من القائمة نفسِها هو عددُ ما طُبِّق هنا.
 // ⛔ لا @Ignore ولا assume ولا تعديلَ في الاختبارات: الاستثناءُ هنا وحده، والاختباراتُ تعمل في app-test الخاصّ كما هي.
 // ⛔ بلا نجمةٍ: كلُّ سطرٍ اسمٌ كاملٌ لدالّةٍ واحدة (يرفض الحارسُ ما غيرَ ذلك قبل أن يصل إلى هنا؛ ويُعاد الفحصُ هنا دفاعاً).
+import groovy.json.JsonSlurper
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.Path
+import java.nio.file.attribute.PosixFilePermission
+
 def excludesPath = System.getProperty('pci.test.excludes')
 if (excludesPath != null && !excludesPath.isEmpty()) {
-    def excludesFile = new File(excludesPath)
-    if (!excludesFile.isFile()) {
-        throw new GradleException('pci: ملفُّ الاستثناءات غيرُ موجود — لا يجري Gradle بلا حارسٍ تحقّق منه')
+    def fail = { String why -> throw new GradleException('pci: ' + why) }
+    def listPath = System.getProperty('pci.test.excludes.list')
+    def kind = System.getProperty('pci.test.excludes.kind')
+    def owner = System.getProperty('pci.test.excludes.owner')
+    if (!listPath || !kind || !owner) {
+        fail('لا قائمةَ موثوقةً أو نوعَ أو مالكاً للاستثناءات — لا يجري Gradle بلا ربطٍ بالقائمة الموثوقة')
     }
-    def patterns = excludesFile.readLines('UTF-8')
+    def nofollow = LinkOption.NOFOLLOW_LINKS
+    // ملفٌّ عاديٌّ لا رابط، هو وأبوه للمالك المعلَن بلا بِتّ كتابةٍ للمجموعة ولا للغير
+    def sealedFile = { String p ->
+        Path f = new File(p).toPath().toAbsolutePath()
+        if (!Files.isRegularFile(f, nofollow)) {
+            fail('ملفُّ الاستثناءات غيرُ موجود أو ليس ملفّاً عاديّاً — لا يجري Gradle بلا حارسٍ تحقّق منه')
+        }
+        [f, f.parent].each { Path x ->
+            if (Files.isSymbolicLink(x)) fail('رابطٌ رمزيّ في مسار الاستثناءات')
+            if (Files.getOwner(x, nofollow).name != owner) fail('ملفّاتُ الاستثناءات لغير مالكها المعلَن')
+            def perms = Files.getPosixFilePermissions(x, nofollow)
+            if (perms.contains(PosixFilePermission.GROUP_WRITE) || perms.contains(PosixFilePermission.OTHERS_WRITE)) {
+                fail('ملفّاتُ الاستثناءات قابلةٌ للكتابة لغير مالكها')
+            }
+        }
+        f
+    }
+    def excludesFile = sealedFile(excludesPath)
+    def listFile = sealedFile(listPath)
+    def patterns = new String(Files.readAllBytes(excludesFile), 'UTF-8').readLines()
             .collect { it.trim() }
             .findAll { !it.isEmpty() && !it.startsWith('#') }
     patterns.each { p ->
         if (p.contains('*') || !(p =~ /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+\..+$/)) {
-            throw new GradleException('pci: نمطُ استثناءٍ غيرُ مقبول (نجمةٌ أو اسمٌ غيرُ كامل)')
+            fail('نمطُ استثناءٍ غيرُ مقبول (نجمةٌ أو اسمٌ غيرُ كامل)')
         }
+    }
+    def listed = new JsonSlurper().parse(listFile.toFile(), 'UTF-8')
+    if (!(listed instanceof Map) || !(listed['excludes'] instanceof List)) fail('القائمةُ الموثوقة ليست كائناً بحقل excludes')
+    // ⛔ ['class'] لا ‎.class (هذه صنفُ الخريطة نفسِها في Groovy)
+    def expected = listed['excludes'].findAll { it instanceof Map && it['kind'] == kind }
+            .collect { e -> (e['class'] as String) + '.' + (e['method'] as String) }
+    if (patterns != expected) {
+        fail("الأنماطُ لا تطابق القائمةَ الموثوقة للنوع حرفاً وترتيباً (في الملفّ ${patterns.size()} · في القائمة ${expected.size()})")
     }
     gradle.allprojects {
         tasks.withType(Test).configureEach { testTask ->

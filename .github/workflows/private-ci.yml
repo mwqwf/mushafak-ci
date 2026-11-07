@@ -135,7 +135,7 @@ jobs:
 
       # ⛔ من هنا شيفرةٌ غيرُ موثوقة (بمستخدم pcibuild)، ولا سرَّ في أيّ خطوة.
       # الإصلاحُ السادس (Codex 15 · ملاحظة finalize): موعدٌ خارجيٌّ لكلّ خطوةٍ للمشرف. الأطوارُ تنتهي داخلياً عند deadline =
-      #     نهايةُ الميزانية − FIN_RESERVE (365 ث)؛ فمهلةُ الخطوة = الميزانيةُ كلُّها (leg.timeout دقيقة) تزيد على الأطوار بـFIN_RESERVE على الأقلّ.
+      #     نهايةُ الميزانية − FIN_RESERVE (370 ث منذ ختم الاستثناءات · Codex 6)؛ فمهلةُ الخطوة = الميزانيةُ كلُّها (leg.timeout دقيقة) تزيد على الأطوار بـFIN_RESERVE على الأقلّ.
       - name: البناء والاختبار (المخرجات إلى ملف)
         timeout-minutes: ${{ matrix.leg.timeout }}
         if: steps.clone.outcome == 'success'
@@ -155,7 +155,7 @@ jobs:
         run: python3 -I -S "$RUNNER_TEMP/pci/ctl/guard.py" --emit-plant
 
       # D13: يقتل عمليّاتِ pcibuild ← يعدّ ← يشفّر ← يفحص ⇒ ready=true|false (المشرفُ وحده يكتب مجلّدَ الناتج).
-      # الإصلاحُ السادس: finalize ≤ FIN_RESERVE = 365 ث ≈ 6.1 د بالإثبات في supervise.sh (كلُّ أمرٍ فيه بمهلة) ⇒ 8 د = 6.1 + هامشُ ≈ 1.9 د
+      # الإصلاحُ السادس: finalize ≤ FIN_RESERVE = 370 ث ≈ 6.2 د بالإثبات في supervise.sh (كلُّ أمرٍ فيه بمهلة؛ ومنه ختمُ الاستثناءات · Codex 6) ⇒ 8 د = 6.2 + هامشُ ≈ 1.8 د
       #     لبدء الصدفة وpython3؛ ومهلةُ الوظيفة (الميزانية + 6 د · plan.py JOB_MARGIN) تبقى فوقها.
       - name: العدّ والتشفير والفحص
         id: fin

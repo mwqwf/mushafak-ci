@@ -7,6 +7,13 @@
            في --out، ويطبع المستثنى (يذهب إلى السجلّ الخاصّ المشفَّر). أيُّ عنصرٍ لا يثبت ⇒ خروجٌ 1 بسببٍ مكتوب ولا يُكتب
            ملفُّ أنماطٍ أصلاً (فلا يجري Gradle بقائمةٍ ناقصةٍ التحقّق).
   count  — عددُ عناصر النوع في القائمة (يستعمله publish لوصف الحالة؛ ولا يقرأ الاستنساخ).
+  check  — (المشرف) ملفُّ الأنماط يطابق **بايتاً ببايت** الشكلَ القانونيّ لأنماط النوع في القائمة الموثوقة، ويطبع عددَها.
+  sealed — (المشرف في finalize) الملفُّ المثبَّت في مدخل التحكّم نسخةُ المرجع بعينها، عاديٌّ لا رابط، و(بـ--chain-uid)
+           كلُّ مكوّنٍ من الجذر حتى الملفّ يملكه ذلك المستخدم بلا كتابةٍ للمجموعة ولا للغير ولا رابطٍ رمزيّ (مرآةُ root_chain_ok).
+
+⛔ مراجعة Codex السادسة (2026-11-07 · §3): الحارسُ لا يجري بعدُ بمستخدم البناء ولا يكتب في مجلّده. المشرفُ يشغّله بحسابه على الشجرة
+   الأصليّة **قبل أن يملكها البناء** (do_clone)، ثمّ يثبّت الأنماطَ في مدخل التحكّم الذي يملكه root (طورُ forbidden_excludes الموثوق)،
+   فلا تغيّرها عمليّةٌ باقيةٌ ولا wrapper المستودع؛ ويطابقها سكربتُ Gradle بالقائمة الموثوقة، ويختمها المشرفُ بعد زوال البناء.
 
 قواعدُ الحارس لكلّ عنصر:
   ١. الصنفُ موجودٌ بالضبط مرّةً في الاستنساخ: ملفٌّ باسمه (.kt/.java) تحت src/test في مجلّداتٍ تطابق حزمتَه، فيه سطرُ package وclass.
@@ -74,10 +81,18 @@ def entries_for(kind, path=None):
 
 
 def _read_regular(path):
+    """Codex 6 §3: يجري بحساب المشرف على شجرةٍ غيرِ موثوقة ⇒ يُفتح بلا اتّباع رابطٍ ويُفحص الواصفُ نفسُه (لا سباقَ بين الفحص والفتح)."""
     st = os.lstat(path)
     if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size > MAX_FILE:
         raise Refusal("ملفُّ الاختبار ليس ملفّاً عاديّاً مقبولاً (رابطٌ أو كبيرٌ أو أكثرُ من رابطٍ صلب)")
-    with open(path, "rb") as f:
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        raise Refusal("ملفُّ الاختبار ليس ملفّاً عاديّاً مقبولاً (رابطٌ أو كبيرٌ أو أكثرُ من رابطٍ صلب)")
+    with os.fdopen(fd, "rb") as f:
+        fst = os.fstat(f.fileno())
+        if not stat.S_ISREG(fst.st_mode) or fst.st_nlink != 1 or fst.st_size > MAX_FILE:
+            raise Refusal("ملفُّ الاختبار ليس ملفّاً عاديّاً مقبولاً (رابطٌ أو كبيرٌ أو أكثرُ من رابطٍ صلب)")
         return f.read(MAX_FILE + 1).decode("utf-8", errors="replace")
 
 
@@ -214,6 +229,81 @@ def verify(src, kind, entries, absent=True):
     return patterns, lines
 
 
+HEADER = "# أنماطُ استثناءٍ بالتصميم — يولّدها forbidden_excludes.py ويقرؤها forbidden_excludes.init.gradle\n"
+MAX_PATTERNS = 64 * 1024
+
+
+def canonical(patterns):
+    """الشكلُ القانونيّ الوحيد لملفّ الأنماط: الترويسةُ ثمّ نمطٌ في كلّ سطر بترتيب القائمة (يطابقه check بايتاً ببايت)."""
+    return HEADER + "".join(p + "\n" for p in patterns)
+
+
+def expected_patterns(kind, path=None):
+    return [pattern_of(e) for e in entries_for(kind, path)]
+
+
+def _read_nofollow(path, cap):
+    """(البايتات، stat) لملفٍّ عاديٍّ برابطٍ صلبٍ واحد يُفتح بلا اتّباع رابط (لا سباقَ بين الفحص والفتح)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+    except OSError:
+        raise Refusal("ملفُّ الأنماط غائبٌ أو رابطٌ رمزيّ")
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size > cap:
+            raise Refusal("ملفُّ الأنماط ليس ملفّاً عاديّاً مقبولاً (رابطٌ أو كبيرٌ أو أكثرُ من رابطٍ صلب)")
+        chunks, n = [], 0
+        while True:
+            b = os.read(fd, 65536)
+            if not b:
+                break
+            chunks.append(b)
+            n += len(b)
+            if n > cap:
+                raise Refusal("ملفُّ الأنماط أكبرُ من الحدّ")
+        return b"".join(chunks), st
+    finally:
+        os.close(fd)
+
+
+def check_patterns(path, kind, listing=None):
+    """عددُ الأنماط إن طابق الملفُّ الشكلَ القانونيّ لأنماط النوع في القائمة الموثوقة بايتاً ببايت، وإلا Refusal."""
+    data, _ = _read_nofollow(path, MAX_PATTERNS)
+    want = expected_patterns(kind, listing)
+    if data != canonical(want).encode("utf-8"):
+        raise Refusal("ملفُّ الأنماط لا يطابق القائمةَ الموثوقة حرفاً (عدداً أو ترتيباً أو اسماً أو زيادة)")
+    return len(want)
+
+
+def chain_ok(path, uid):
+    """مرآةُ root_chain_ok في supervise.sh: كلُّ مكوّنٍ من الجذر حتى الملفّ ليس رابطاً، يملكه uid، بلا بِتّ كتابةٍ للمجموعة ولا للغير."""
+    if not os.path.isabs(path):
+        return False
+    cur = "/"
+    for part in [""] + [c for c in path.split("/") if c]:
+        if part in (".", ".."):
+            return False
+        if part:
+            cur = os.path.join(cur, part)
+        try:
+            st = os.lstat(cur)
+        except OSError:
+            return False
+        if stat.S_ISLNK(st.st_mode) or st.st_uid != uid or st.st_mode & 0o022:
+            return False
+    return True
+
+
+def sealed(path, ref, chain_uid=None):
+    """الملفُّ المثبَّت نسخةُ المرجع بعينها (عاديٌّ برابطٍ واحد، بلا اتّباع رابط)؛ ومع chain_uid سلسلتُه كلُّها مختومة. وإلا Refusal."""
+    got, _ = _read_nofollow(path, MAX_PATTERNS)
+    want, _ = _read_nofollow(ref, MAX_PATTERNS)
+    if got != want:
+        raise Refusal("الملفُّ المثبَّت لا يطابق نسخةَ المشرف")
+    if chain_uid is not None and not chain_ok(path, chain_uid):
+        raise Refusal("سلسلةُ الملفّ المثبَّت فقدت ختمَها (مالكٌ أو كتابةٌ لغيره أو رابط)")
+
+
 def cmd_verify(a):
     try:
         entries = load_list(a.list)
@@ -227,13 +317,30 @@ def cmd_verify(a):
         return 1
     tmp = a.out + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        f.write("# أنماطُ استثناءٍ بالتصميم — يولّدها forbidden_excludes.py ويقرؤها forbidden_excludes.init.gradle\n")
-        for p in patterns:
-            f.write(p + "\n")
+        f.write(canonical(patterns))
     os.replace(tmp, a.out)
     print(f"forbidden_excludes: {len(patterns)} دالّةً مستثناةً بالتصميم (النوع {a.kind})")
     for ln in lines:
         print(ln)
+    return 0
+
+
+def cmd_check(a):
+    try:
+        n = check_patterns(a.patterns, a.kind, a.list)
+    except (Refusal, OSError, ValueError) as r:
+        print(f"forbidden_excludes: ⛔ {r}")
+        return 1
+    print(n)
+    return 0
+
+
+def cmd_sealed(a):
+    try:
+        sealed(a.file, a.ref, a.chain_uid)
+    except (Refusal, OSError, ValueError) as r:
+        print(f"forbidden_excludes: ⛔ {r}")
+        return 1
     return 0
 
 
@@ -257,8 +364,16 @@ def main(argv):
     c = sub.add_parser("count")
     c.add_argument("--kind", required=True)
     c.add_argument("--list", default=None)
+    k = sub.add_parser("check")
+    k.add_argument("--kind", required=True)
+    k.add_argument("--patterns", required=True)
+    k.add_argument("--list", default=None)
+    s_ = sub.add_parser("sealed")
+    s_.add_argument("--file", required=True)
+    s_.add_argument("--ref", required=True)
+    s_.add_argument("--chain-uid", type=int, default=None)
     a = p.parse_args(argv[1:])
-    return cmd_verify(a) if a.cmd == "verify" else cmd_count(a)
+    return {"verify": cmd_verify, "count": cmd_count, "check": cmd_check, "sealed": cmd_sealed}[a.cmd](a)
 
 
 if __name__ == "__main__":
